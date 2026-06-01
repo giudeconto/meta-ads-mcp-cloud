@@ -1,0 +1,17 @@
+{
+  "name": "meta-ads-escala",
+  "version": "2.0.0",
+  "description": "Servidor MCP Meta Ads - Escala Ads",
+  "type": "module",
+  "main": "meta_ads_server_http.mjs",
+  "scripts": {
+    "start": "node meta_ads_server_http.mjs",
+    "dev": "node meta_ads_server_http.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
