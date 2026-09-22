@@ -369,9 +369,26 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
     issuer:                 base,
     authorization_endpoint: `${base}/oauth/authorize`,
     token_endpoint:         `${base}/oauth/token`,
+    registration_endpoint:  `${base}/oauth/register`,
     response_types_supported: ["code"],
     grant_types_supported:    ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none"],
+  });
+});
+
+// OAuth Dynamic Client Registration (RFC 7591) — cada gestor que liga o
+// conector recebe automaticamente um client_id próprio, sem passos manuais.
+app.post("/oauth/register", (req, res) => {
+  const { redirect_uris = [], client_name = "meta-ads-escala client" } = req.body || {};
+  res.status(201).json({
+    client_id: `escala-client-${randomUUID()}`,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_name,
+    redirect_uris,
+    grant_types: ["authorization_code"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
   });
 });
 
