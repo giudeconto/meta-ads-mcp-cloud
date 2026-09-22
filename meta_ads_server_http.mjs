@@ -377,10 +377,21 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
   });
 });
 
+// Alguns clientes MCP pedem primeiro este metadata (RFC 9728) antes do
+// oauth-authorization-server — respondemos para não cair em 404.
+app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"], (req, res) => {
+  const base = `${req.protocol}://${req.get("host")}`;
+  res.json({
+    resource: `${base}/mcp`,
+    authorization_servers: [base],
+  });
+});
+
 // OAuth Dynamic Client Registration (RFC 7591) — cada gestor que liga o
 // conector recebe automaticamente um client_id próprio, sem passos manuais.
-app.post("/oauth/register", (req, res) => {
-  const { redirect_uris = [], client_name = "meta-ads-escala client" } = req.body || {};
+// Aceita GET e POST porque o cliente do Claude usou GET aqui.
+app.all("/oauth/register", (req, res) => {
+  const { redirect_uris = [], client_name = "meta-ads-escala client" } = req.body || req.query || {};
   res.status(201).json({
     client_id: `escala-client-${randomUUID()}`,
     client_id_issued_at: Math.floor(Date.now() / 1000),
