@@ -16,12 +16,14 @@ import { randomUUID } from "crypto";
 // ─── Configuração ─────────────────────────────────────────────────────────────
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
 const META_BUSINESS_ID  = process.env.META_BUSINESS_ID  || "";
+const APPROVAL_CODE     = process.env.APPROVAL_CODE || "";
 const PORT              = process.env.PORT || 3000;
 const API_VERSION       = "v20.0";
 const BASE_URL          = `https://graph.facebook.com/${API_VERSION}`;
 
 if (!META_ACCESS_TOKEN) process.stderr.write("[meta-ads-escala] ERRO: META_ACCESS_TOKEN não definido.\n");
 if (!META_BUSINESS_ID)  process.stderr.write("[meta-ads-escala] ERRO: META_BUSINESS_ID não definido.\n");
+if (!APPROVAL_CODE)     process.stderr.write("[meta-ads-escala] AVISO: APPROVAL_CODE não definido — ativação de campanhas ficará bloqueada até ser configurado.\n");
 
 // ─── Helpers Meta API ─────────────────────────────────────────────────────────
 async function metaGet(endpoint, params = {}) {
@@ -72,6 +74,16 @@ async function metaGetAll(endpoint, params = {}) {
   return { data: results };
 }
 
+// ─── Aprovação de ativação ────────────────────────────────────────────────────
+// Bloqueia qualquer mudança de status para ACTIVE que não venha com o código de
+// aprovação correto. Retorna uma mensagem de erro (string) se bloqueado, ou null se liberado.
+function bloqueiaAtivacaoSemCodigo(status, codigo_aprovacao) {
+  if (status !== "ACTIVE") return null;
+  if (!APPROVAL_CODE) return "Ativação bloqueada: APPROVAL_CODE não está configurado no servidor.";
+  if (codigo_aprovacao !== APPROVAL_CODE) return "Ativação bloqueada: código de aprovação em falta ou inválido. Peça a aprovação a quem gere a conta (use 'aprovar_e_ativar').";
+  return null;
+}
+
 // ─── Factory MCP ──────────────────────────────────────────────────────────────
 function createMcpServer() {
   const server = new Server(
@@ -96,18 +108,19 @@ function createMcpServer() {
       { name: "resumo_todos_clientes", description: "Resumo de TODAS as contas ativas", inputSchema: { type: "object", properties: { periodo: { type: "string", default: "last_30d" } }, required: [] } },
       { name: "metricas_conta_por_campanha", description: "Métricas por campanha dentro de uma conta", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, periodo: { type: "string", default: "last_30d" } }, required: ["conta_id"] } },
       // CRIAÇÃO
-      { name: "criar_campanha", description: "Cria uma nova campanha", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, objetivo: { type: "string", description: "OUTCOME_AWARENESS | OUTCOME_TRAFFIC | OUTCOME_ENGAGEMENT | OUTCOME_LEADS | OUTCOME_APP_PROMOTION | OUTCOME_SALES" }, status: { type: "string", default: "PAUSED" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, limite_gasto: { type: "number" }, bid_strategy: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } } }, required: ["conta_id", "nome", "objetivo"] } },
-      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string", default: "PAUSED" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" } }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: true }, bid_amount: { type: "number" } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
+      { name: "criar_campanha", description: "Cria uma nova campanha. É SEMPRE criada em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, objetivo: { type: "string", description: "OUTCOME_AWARENESS | OUTCOME_TRAFFIC | OUTCOME_ENGAGEMENT | OUTCOME_LEADS | OUTCOME_APP_PROMOTION | OUTCOME_SALES" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, limite_gasto: { type: "number" }, bid_strategy: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } } }, required: ["conta_id", "nome", "objetivo"] } },
+      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" } }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: true }, bid_amount: { type: "number" } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
       { name: "criar_criativo", description: "Cria um criativo de anúncio", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, pagina_id: { type: "string" }, instagram_id: { type: "string" }, titulo: { type: "string" }, corpo: { type: "string" }, descricao: { type: "string" }, url_destino: { type: "string" }, cta: { type: "string", description: "LEARN_MORE | SHOP_NOW | SIGN_UP | DOWNLOAD | GET_QUOTE | CONTACT_US | SEND_MESSAGE | WHATSAPP_MESSAGE" }, imagem_hash: { type: "string" }, video_id: { type: "string" }, formato: { type: "string", default: "SINGLE_IMAGE" }, carousel_cards: { type: "array", items: { type: "object" } }, url_parametros: { type: "string" } }, required: ["conta_id", "nome", "pagina_id", "corpo", "url_destino", "cta"] } },
-      { name: "criar_anuncio", description: "Cria um anúncio associando criativo a um conjunto", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, conjunto_id: { type: "string" }, nome: { type: "string" }, criativo_id: { type: "string" }, status: { type: "string", default: "PAUSED" } }, required: ["conta_id", "conjunto_id", "nome", "criativo_id"] } },
+      { name: "criar_anuncio", description: "Cria um anúncio associando criativo a um conjunto. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, conjunto_id: { type: "string" }, nome: { type: "string" }, criativo_id: { type: "string" } }, required: ["conta_id", "conjunto_id", "nome", "criativo_id"] } },
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" } }, required: ["conta_id", "nome", "tipo"] } },
       { name: "criar_publico_semelhante", description: "Cria um público Lookalike", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, publico_origem_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, tamanho: { type: "number", default: 1 }, nome: { type: "string" } }, required: ["conta_id", "publico_origem_id", "paises", "nome"] } },
       // GESTÃO
-      { name: "atualizar_campanha", description: "Atualiza uma campanha", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, limite_gasto: { type: "number" }, data_fim: { type: "string" } }, required: ["campanha_id"] } },
-      { name: "atualizar_conjunto_anuncios", description: "Atualiza um conjunto de anúncios", inputSchema: { type: "object", properties: { conjunto_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_fim: { type: "string" }, bid_amount: { type: "number" } }, required: ["conjunto_id"] } },
-      { name: "atualizar_anuncio", description: "Atualiza um anúncio", inputSchema: { type: "object", properties: { anuncio_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" } }, required: ["anuncio_id"] } },
-      { name: "duplicar_campanha", description: "Duplica uma campanha", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, conta_destino: { type: "string" }, novo_nome: { type: "string" }, status_inicial: { type: "string", default: "PAUSED" } }, required: ["campanha_id"] } },
+      { name: "atualizar_campanha", description: "Atualiza uma campanha. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, limite_gasto: { type: "number" }, data_fim: { type: "string" } }, required: ["campanha_id"] } },
+      { name: "atualizar_conjunto_anuncios", description: "Atualiza um conjunto de anúncios. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { conjunto_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_fim: { type: "string" }, bid_amount: { type: "number" } }, required: ["conjunto_id"] } },
+      { name: "atualizar_anuncio", description: "Atualiza um anúncio. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { anuncio_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" } }, required: ["anuncio_id"] } },
+      { name: "aprovar_e_ativar", description: "Aprova e ativa (PAUSED → ACTIVE) uma campanha, conjunto de anúncios ou anúncio. Requer o código de aprovação interno da agência.", inputSchema: { type: "object", properties: { nivel: { type: "string", description: "campanha | conjunto | anuncio" }, id: { type: "string" }, codigo_aprovacao: { type: "string" } }, required: ["nivel", "id", "codigo_aprovacao"] } },
+      { name: "duplicar_campanha", description: "Duplica uma campanha. Para duplicar já em ACTIVE é necessário fornecer codigo_aprovacao.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, conta_destino: { type: "string" }, novo_nome: { type: "string" }, status_inicial: { type: "string", default: "PAUSED" }, codigo_aprovacao: { type: "string" } }, required: ["campanha_id"] } },
       { name: "pesquisar_interesses", description: "Pesquisa interesses para targeting", inputSchema: { type: "object", properties: { termo: { type: "string" }, locale: { type: "string", default: "pt_PT" } }, required: ["termo"] } },
       { name: "estimar_alcance", description: "Estima o alcance de um targeting", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" } }, publicos_custom: { type: "array", items: { type: "string" } }, orcamento_diario: { type: "number" }, objetivo_otimizacao: { type: "string" } }, required: ["conta_id", "paises"] } },
     ],
@@ -183,8 +196,9 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaGet(`${conta_id}/insights`, { fields: "campaign_name,campaign_id,impressions,clicks,spend,reach,frequency,cpc,cpm,ctr,actions,cost_per_action_type,purchase_roas", date_preset: periodo, level: "campaign", limit: "200" }), null, 2) }] };
     }
     if (name === "criar_campanha") {
-      const { conta_id, nome, objetivo, status = "PAUSED", orcamento_diario, orcamento_total, data_inicio, data_fim, limite_gasto, bid_strategy, special_ad_categories = [] } = args;
-      const b = { name: nome, objective: objetivo, status, special_ad_categories };
+      const { conta_id, nome, objetivo, orcamento_diario, orcamento_total, data_inicio, data_fim, limite_gasto, bid_strategy, special_ad_categories = [] } = args;
+      // Toda campanha nasce em PAUSED — ativação exige aprovação via 'aprovar_e_ativar'.
+      const b = { name: nome, objective: objetivo, status: "PAUSED", special_ad_categories };
       if (orcamento_diario) b.daily_budget    = String(orcamento_diario);
       if (orcamento_total)  b.lifetime_budget = String(orcamento_total);
       if (limite_gasto)     b.spend_cap       = String(limite_gasto);
@@ -194,7 +208,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/campaigns`, b), null, 2) }] };
     }
     if (name === "criar_conjunto_anuncios") {
-      const { conta_id, campanha_id, nome, status = "PAUSED", orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = true, bid_amount } = args;
+      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = true, bid_amount } = args;
       const targeting = { age_min: idade_min, age_max: idade_max, geo_locations: { countries: paises } };
       if (genero.length)           targeting.genders                   = genero;
       if (interesses.length)       targeting.interests                 = interesses;
@@ -205,7 +219,8 @@ function createMcpServer() {
         targeting.facebook_positions  = ["feed", "right_hand_column", "marketplace", "video_feeds", "story", "search", "reels"];
         targeting.instagram_positions = ["stream", "story", "explore", "reels", "profile_feed"];
       }
-      const b = { name: nome, campaign_id: campanha_id, status, optimization_goal: objetivo_otimizacao, billing_event: evento_cobranca, targeting };
+      // Todo conjunto de anúncios nasce em PAUSED — ativação exige aprovação via 'aprovar_e_ativar'.
+      const b = { name: nome, campaign_id: campanha_id, status: "PAUSED", optimization_goal: objetivo_otimizacao, billing_event: evento_cobranca, targeting };
       if (orcamento_diario) b.daily_budget   = String(orcamento_diario);
       if (orcamento_total)  b.lifetime_budget = String(orcamento_total);
       if (data_inicio)      b.start_time      = data_inicio;
@@ -234,8 +249,9 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/adcreatives`, { name: nome, object_story_spec: spec }), null, 2) }] };
     }
     if (name === "criar_anuncio") {
-      const { conta_id, conjunto_id, nome, criativo_id, status = "PAUSED" } = args;
-      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/ads`, { name: nome, adset_id: conjunto_id, creative: { creative_id: criativo_id }, status }), null, 2) }] };
+      const { conta_id, conjunto_id, nome, criativo_id } = args;
+      // Todo anúncio nasce em PAUSED — ativação exige aprovação via 'aprovar_e_ativar'.
+      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/ads`, { name: nome, adset_id: conjunto_id, creative: { creative_id: criativo_id }, status: "PAUSED" }), null, 2) }] };
     }
     if (name === "fazer_upload_imagem") {
       const { conta_id, url_imagem } = args;
@@ -257,7 +273,9 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/customaudiences`, { name: nome, origin_audience_id: publico_origem_id, subtype: "LOOKALIKE", lookalike_spec: JSON.stringify({ type: "similarity", ratio: tamanho / 100, countries: paises }) }), null, 2) }] };
     }
     if (name === "atualizar_campanha") {
-      const { campanha_id, nome, status, orcamento_diario, orcamento_total, limite_gasto, data_fim } = args;
+      const { campanha_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, limite_gasto, data_fim } = args;
+      const erro = bloqueiaAtivacaoSemCodigo(status, codigo_aprovacao);
+      if (erro) return { content: [{ type: "text", text: JSON.stringify({ error: erro }, null, 2) }] };
       const b = {};
       if (nome)             b.name            = nome;
       if (status)           b.status          = status;
@@ -268,7 +286,9 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${campanha_id}`, b), null, 2) }] };
     }
     if (name === "atualizar_conjunto_anuncios") {
-      const { conjunto_id, nome, status, orcamento_diario, orcamento_total, data_fim, bid_amount } = args;
+      const { conjunto_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, data_fim, bid_amount } = args;
+      const erro = bloqueiaAtivacaoSemCodigo(status, codigo_aprovacao);
+      if (erro) return { content: [{ type: "text", text: JSON.stringify({ error: erro }, null, 2) }] };
       const b = {};
       if (nome)             b.name            = nome;
       if (status)           b.status          = status;
@@ -279,14 +299,25 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conjunto_id}`, b), null, 2) }] };
     }
     if (name === "atualizar_anuncio") {
-      const { anuncio_id, nome, status } = args;
+      const { anuncio_id, nome, status, codigo_aprovacao } = args;
+      const erro = bloqueiaAtivacaoSemCodigo(status, codigo_aprovacao);
+      if (erro) return { content: [{ type: "text", text: JSON.stringify({ error: erro }, null, 2) }] };
       const b = {};
       if (nome)   b.name   = nome;
       if (status) b.status = status;
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${anuncio_id}`, b), null, 2) }] };
     }
+    if (name === "aprovar_e_ativar") {
+      const { nivel, id, codigo_aprovacao } = args;
+      if (!APPROVAL_CODE) return { content: [{ type: "text", text: JSON.stringify({ error: "Ativação bloqueada: APPROVAL_CODE não está configurado no servidor." }, null, 2) }] };
+      if (codigo_aprovacao !== APPROVAL_CODE) return { content: [{ type: "text", text: JSON.stringify({ error: "Código de aprovação inválido." }, null, 2) }] };
+      if (!["campanha", "conjunto", "anuncio"].includes(nivel)) return { content: [{ type: "text", text: JSON.stringify({ error: "nivel inválido: use 'campanha', 'conjunto' ou 'anuncio'." }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${id}`, { status: "ACTIVE" }), null, 2) }] };
+    }
     if (name === "duplicar_campanha") {
-      const { campanha_id, conta_destino, novo_nome, status_inicial = "PAUSED" } = args;
+      const { campanha_id, conta_destino, novo_nome, status_inicial = "PAUSED", codigo_aprovacao } = args;
+      const erro = bloqueiaAtivacaoSemCodigo(status_inicial, codigo_aprovacao);
+      if (erro) return { content: [{ type: "text", text: JSON.stringify({ error: erro }, null, 2) }] };
       const b = { status: status_inicial };
       if (conta_destino) b.account_id = conta_destino.replace("act_", "");
       if (novo_nome)     b.name       = novo_nome;
