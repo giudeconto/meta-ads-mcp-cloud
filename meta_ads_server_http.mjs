@@ -216,7 +216,7 @@ function createMcpServer() {
       if (publicos_excluir.length) targeting.excluded_custom_audiences = publicos_excluir.map(id => ({ id }));
       if (placements_automaticos) {
         targeting.publisher_platforms = ["facebook", "instagram", "audience_network", "messenger"];
-        targeting.facebook_positions  = ["feed", "right_hand_column", "marketplace", "video_feeds", "story", "search", "facebook_reels"];
+        targeting.facebook_positions  = ["feed", "right_hand_column", "marketplace", "story", "search", "facebook_reels"];
         targeting.instagram_positions = ["stream", "story", "explore", "reels", "profile_feed"];
       }
       // Todo conjunto de anúncios nasce em PAUSED — ativação exige aprovação via 'aprovar_e_ativar'.
