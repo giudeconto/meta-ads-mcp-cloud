@@ -446,7 +446,13 @@ app.all("/mcp", async (req, res) => {
       return;
     }
 
-    res.status(400).json({ error: "Session not found" });
+    // Sessão desconhecida (ex.: o servidor reiniciou e perdeu o mapa em
+    // memória, mas o cliente ainda envia um mcp-session-id antigo). A
+    // especificação do MCP Streamable HTTP diz que o servidor deve responder
+    // 404 nesse caso — é o sinal que faz o cliente descartar o ID antigo e
+    // reiniciar sozinho a sessão (novo initialize), sem o utilizador ter de
+    // desligar/religar o conector manualmente.
+    res.status(404).json({ error: "Session not found" });
   } catch (e) {
     process.stderr.write(`[meta-ads-escala] Erro MCP: ${e.message}\n`);
     res.status(500).json({ error: e.message });
