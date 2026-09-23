@@ -113,6 +113,8 @@ function createMcpServer() {
       { name: "criar_criativo", description: "Cria um criativo de anúncio", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, pagina_id: { type: "string" }, instagram_id: { type: "string" }, titulo: { type: "string" }, corpo: { type: "string" }, descricao: { type: "string" }, url_destino: { type: "string" }, cta: { type: "string", description: "LEARN_MORE | SHOP_NOW | SIGN_UP | DOWNLOAD | GET_QUOTE | CONTACT_US | SEND_MESSAGE | WHATSAPP_MESSAGE" }, imagem_hash: { type: "string" }, video_id: { type: "string" }, formato: { type: "string", default: "SINGLE_IMAGE" }, carousel_cards: { type: "array", items: { type: "object" } }, url_parametros: { type: "string" } }, required: ["conta_id", "nome", "pagina_id", "corpo", "url_destino", "cta"] } },
       { name: "criar_anuncio", description: "Cria um anúncio associando criativo a um conjunto. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, conjunto_id: { type: "string" }, nome: { type: "string" }, criativo_id: { type: "string" } }, required: ["conta_id", "conjunto_id", "nome", "criativo_id"] } },
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
+      { name: "fazer_upload_video", description: "Upload de vídeo via URL para a biblioteca de vídeos da conta. O processamento na Meta é assíncrono — pode ser preciso aguardar antes do video_id ficar pronto para uso num criativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_video: { type: "string" }, nome: { type: "string" } }, required: ["conta_id", "url_video"] } },
+      { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" } }, required: ["conta_id", "nome", "tipo"] } },
       { name: "criar_publico_semelhante", description: "Cria um público Lookalike", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, publico_origem_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, tamanho: { type: "number", default: 1 }, nome: { type: "string" } }, required: ["conta_id", "publico_origem_id", "paises", "nome"] } },
       // GESTÃO
@@ -215,7 +217,13 @@ function createMcpServer() {
       if (interesses.length)       targeting.interests                 = interesses;
       if (publicos_incluir.length) targeting.custom_audiences          = publicos_incluir.map(id => ({ id }));
       if (publicos_excluir.length) targeting.excluded_custom_audiences = publicos_excluir.map(id => ({ id }));
-      if (placements_automaticos) {
+      if (!placements_automaticos) {
+        // Só restringimos posicionamentos quando o pedido é explicitamente manual.
+        // Com placements_automaticos=true (padrão), não enviamos publisher_platforms
+        // nem facebook_positions/instagram_positions: deixar o campo de fora é o
+        // sinal correto para a Meta escolher TODOS os posicionamentos elegíveis
+        // automaticamente (Advantage+ placements), incluindo os que a Meta lançar
+        // no futuro — evita ficarmos reféns de listas fixas que a Meta descontinua.
         targeting.publisher_platforms = ["facebook", "instagram", "audience_network", "messenger"];
         targeting.facebook_positions  = ["feed", "right_hand_column", "marketplace", "story", "search", "facebook_reels"];
         targeting.instagram_positions = ["stream", "story", "explore", "reels", "profile_feed"];
@@ -257,6 +265,16 @@ function createMcpServer() {
     if (name === "fazer_upload_imagem") {
       const { conta_id, url_imagem } = args;
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/adimages`, { url: url_imagem }), null, 2) }] };
+    }
+    if (name === "fazer_upload_video") {
+      const { conta_id, url_video, nome } = args;
+      const b = { file_url: url_video };
+      if (nome) { b.name = nome; b.title = nome; }
+      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/advideos`, b), null, 2) }] };
+    }
+    if (name === "verificar_status_video") {
+      const { video_id } = args;
+      return { content: [{ type: "text", text: JSON.stringify(await metaGet(`${video_id}`, { fields: "id,title,status" }), null, 2) }] };
     }
     if (name === "criar_publico_personalizado") {
       const { conta_id, nome, descricao, tipo, pixel_id, retencao_dias = 30, engagement_tipo, engagement_id } = args;
