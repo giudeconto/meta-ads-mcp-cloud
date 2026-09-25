@@ -263,6 +263,7 @@ function createMcpServer() {
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
       { name: "fazer_upload_video", description: "Upload de vídeo via URL para a biblioteca de vídeos da conta. O processamento na Meta é assíncrono — pode ser preciso aguardar antes do video_id ficar pronto para uso num criativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_video: { type: "string" }, nome: { type: "string" } }, required: ["conta_id", "url_video"] } },
       { name: "fazer_upload_imagem_drive", description: "Baixa uma imagem diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de criativos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha (https://drive.google.com/file/d/.../view)" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
+      { name: "verificar_app_token", description: "Diagnóstico: mostra a qual App do Meta for Developers o token da Escala Ads está associado.", inputSchema: { type: "object", properties: {} } },
       { name: "fazer_upload_video_drive", description: "Baixa um vídeo diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de vídeos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa. O processamento na Meta é assíncrono.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha" }, nome: { type: "string" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
       { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado. Para tipo=CUSTOMER_LIST, depois de criado usa 'adicionar_pessoas_publico' para carregar os contactos.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" }, customer_file_source: { type: "string", default: "USER_PROVIDED_ONLY", description: "Só para tipo=CUSTOMER_LIST: USER_PROVIDED_ONLY | PARTNER_PROVIDED_ONLY | BOTH_USER_AND_PARTNER_PROVIDED" } }, required: ["conta_id", "nome", "tipo"] } },
@@ -455,6 +456,10 @@ function createMcpServer() {
       } catch (e) {
         return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
       }
+    }
+    if (name === "verificar_app_token") {
+      const info = await metaGet("debug_token", { input_token: META_ACCESS_TOKEN });
+      return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
     }
     if (name === "fazer_upload_video_drive") {
       const { conta_id, drive_file_id_ou_url, nome } = args;
