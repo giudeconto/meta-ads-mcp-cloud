@@ -193,13 +193,13 @@ function extrairDriveFileId(idOuUrl) {
 async function baixarFicheiroDrive(idOuUrl) {
   const fileId = extrairDriveFileId(idOuUrl);
   const token = await getGoogleAccessToken();
-  const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size`, {
+  const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const meta = await metaRes.json();
   if (meta.error) throw new Error(`Erro ao ler metadados do Drive: ${JSON.stringify(meta.error)}`);
 
-  const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+  const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!fileRes.ok) throw new Error(`Erro ao baixar ficheiro do Drive (HTTP ${fileRes.status}).`);
