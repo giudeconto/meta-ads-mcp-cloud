@@ -294,7 +294,7 @@ function createMcpServer() {
     }
     if (name === "criar_publico_personalizado") {
       const { conta_id, nome, descricao, tipo, pixel_id, retencao_dias = 30, engagement_tipo, engagement_id, customer_file_source } = args;
-      const b = { name: nome };
+      const b = { name: nome, subtype: tipo };
       if (descricao) b.description = descricao;
       if (tipo === "WEBSITE" && pixel_id) {
         b.pixel_id = pixel_id; b.retention_days = retencao_dias;
@@ -327,7 +327,7 @@ function createMcpServer() {
     }
     if (name === "criar_publico_semelhante") {
       const { conta_id, publico_origem_id, paises, tamanho = 1, nome } = args;
-      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/customaudiences`, { name: nome, origin_audience_id: publico_origem_id, lookalike_spec: JSON.stringify({ type: "similarity", ratio: tamanho / 100, countries: paises }) }), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/customaudiences`, { name: nome, origin_audience_id: publico_origem_id, subtype: "LOOKALIKE", lookalike_spec: JSON.stringify({ type: "similarity", ratio: tamanho / 100, countries: paises }) }), null, 2) }] };
     }
     if (name === "atualizar_campanha") {
       const { campanha_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, limite_gasto, data_fim } = args;
