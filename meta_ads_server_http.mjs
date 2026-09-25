@@ -400,6 +400,16 @@ function createMcpServer() {
       } else if (formato === "SINGLE_VIDEO" && video_id) {
         const vd = { video_id, title: titulo, message: corpo, description: descricao, call_to_action: { type: cta, value: { link: url_destino } } };
         if (url_parametros) vd.url_tags = url_parametros;
+        // A Meta exige uma miniatura (thumbnail) no criativo de vídeo. Em vez de pedir para
+        // fornecerem uma, buscamos automaticamente uma das miniaturas que a própria Meta já
+        // gera para o vídeo (fica disponível pouco depois do upload).
+        const thumbs = await metaGet(`${video_id}/thumbnails`, {});
+        const thumb = thumbs?.data?.find(t => t.is_preferred) || thumbs?.data?.[0];
+        if (thumb?.uri) {
+          vd.image_url = thumb.uri;
+        } else {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "O vídeo ainda não tem miniatura disponível — normalmente significa que a Meta ainda está a processá-lo. Tenta novamente dentro de alguns instantes.", thumbnails_resposta: thumbs }, null, 2) }] };
+        }
         spec.video_data = vd;
       } else {
         const ld = { link: url_destino, message: corpo, name: titulo, description: descricao, call_to_action: { type: cta, value: { link: url_destino } } };
