@@ -11,7 +11,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
-import { randomUUID, createHash } from "crypto";
+import { randomUUID, createHash, createSign } from "crypto";
 
 // ─── Configuração ─────────────────────────────────────────────────────────────
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
@@ -20,10 +20,13 @@ const APPROVAL_CODE     = process.env.APPROVAL_CODE || "";
 const PORT              = process.env.PORT || 3000;
 const API_VERSION       = "v20.0";
 const BASE_URL          = `https://graph.facebook.com/${API_VERSION}`;
+const GOOGLE_SA_EMAIL       = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "";
+const GOOGLE_SA_PRIVATE_KEY = (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
 if (!META_ACCESS_TOKEN) process.stderr.write("[meta-ads-escala] ERRO: META_ACCESS_TOKEN não definido.\n");
 if (!META_BUSINESS_ID)  process.stderr.write("[meta-ads-escala] ERRO: META_BUSINESS_ID não definido.\n");
 if (!APPROVAL_CODE)     process.stderr.write("[meta-ads-escala] AVISO: APPROVAL_CODE não definido — ativação de campanhas ficará bloqueada até ser configurado.\n");
+if (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY) process.stderr.write("[meta-ads-escala] AVISO: credenciais da service account do Google Drive não definidas — upload direto do Drive ficará indisponível.\n");
 
 // ─── Helpers Meta API ─────────────────────────────────────────────────────────
 async function metaGet(endpoint, params = {}) {
@@ -72,6 +75,27 @@ async function metaDelete(endpoint) {
   }
 }
 
+// Upload binário real (multipart/form-data) — usado para vídeos grandes vindos
+// do Drive, que não cabem como base64 num campo JSON comum.
+async function metaPostMultipart(endpoint, fields = {}, ficheiro) {
+  const url = `${BASE_URL}/${endpoint}`;
+  const form = new FormData();
+  form.append("access_token", META_ACCESS_TOKEN);
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined && v !== null) form.append(k, String(v));
+  }
+  form.append("source", new Blob([ficheiro.buffer], { type: ficheiro.mimeType || "application/octet-stream" }), ficheiro.nome || "upload");
+  try {
+    const res  = await fetch(url, { method: "POST", body: form });
+    const data = await res.json();
+    if (data.error) process.stderr.write(`[meta-ads-escala] Erro POST multipart: ${JSON.stringify(data.error)}\n`);
+    return data;
+  } catch (e) {
+    process.stderr.write(`[meta-ads-escala] Erro fetch POST multipart: ${e.message}\n`);
+    return { error: e.message };
+  }
+}
+
 async function metaGetAll(endpoint, params = {}) {
   const results = [];
   let data = await metaGet(endpoint, { ...params, limit: "200" });
@@ -87,7 +111,76 @@ async function metaGetAll(endpoint, params = {}) {
   return { data: results };
 }
 
-// ─── Hashing de dados de clientes (públicos de lista) ─────────────────────────
+// ─── Google Drive (service account) ───────────────────────────────────────────
+// Autenticação por JWT assinado manualmente (RFC 7523) — sem depender de
+// nenhuma biblioteca extra do Google, só o módulo "crypto" que já usamos.
+function base64url(input) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+let googleTokenCache = { token: null, expiresAt: 0 };
+
+async function getGoogleAccessToken() {
+  if (googleTokenCache.token && Date.now() < googleTokenCache.expiresAt - 60000) {
+    return googleTokenCache.token;
+  }
+  if (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY) {
+    throw new Error("Credenciais da service account do Google Drive não configuradas (GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY).");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const claims = {
+    iss: GOOGLE_SA_EMAIL,
+    scope: "https://www.googleapis.com/auth/drive.readonly",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  };
+  const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(claims))}`;
+  const signature = createSign("RSA-SHA256").update(signingInput).sign(GOOGLE_SA_PRIVATE_KEY);
+  const jwt = `${signingInput}.${base64url(signature)}`;
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
+  });
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error(`Falha ao autenticar com o Google: ${JSON.stringify(data)}`);
+  }
+  googleTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  return data.access_token;
+}
+
+// Aceita tanto um ID puro como um link de partilha do Drive.
+function extrairDriveFileId(idOuUrl) {
+  const m = String(idOuUrl).match(/\/d\/([a-zA-Z0-9_-]{15,})/) || String(idOuUrl).match(/[?&]id=([a-zA-Z0-9_-]{15,})/);
+  return m ? m[1] : idOuUrl;
+}
+
+async function baixarFicheiroDrive(idOuUrl) {
+  const fileId = extrairDriveFileId(idOuUrl);
+  const token = await getGoogleAccessToken();
+  const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const meta = await metaRes.json();
+  if (meta.error) throw new Error(`Erro ao ler metadados do Drive: ${JSON.stringify(meta.error)}`);
+
+  const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!fileRes.ok) throw new Error(`Erro ao baixar ficheiro do Drive (HTTP ${fileRes.status}).`);
+  const arrayBuffer = await fileRes.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), nome: meta.name, mimeType: meta.mimeType };
+}
+
+
 // A Meta exige que e-mails e telefones cheguem já em SHA-256 — nunca em texto
 // simples. Normalizamos exatamente como a Meta pede antes de fazer o hash:
 // e-mail em minúsculas e sem espaços; telefone só com dígitos (com indicativo
@@ -137,11 +230,13 @@ function createMcpServer() {
       { name: "metricas_conta_por_campanha", description: "Métricas por campanha dentro de uma conta", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, periodo: { type: "string", default: "last_30d" } }, required: ["conta_id"] } },
       // CRIAÇÃO
       { name: "criar_campanha", description: "Cria uma nova campanha. É SEMPRE criada em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, objetivo: { type: "string", description: "OUTCOME_AWARENESS | OUTCOME_TRAFFIC | OUTCOME_ENGAGEMENT | OUTCOME_LEADS | OUTCOME_APP_PROMOTION | OUTCOME_SALES" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, limite_gasto: { type: "number" }, bid_strategy: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } } }, required: ["conta_id", "nome", "objetivo"] } },
-      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" } }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: true }, publico_advantage: { type: "boolean", default: true, description: "true = deixa a Meta expandir o público automaticamente (Advantage+ audience) | false = usa só o targeting definido, sem expansão" }, bid_amount: { type: "number" } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
-      { name: "criar_criativo", description: "Cria um criativo de anúncio", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, pagina_id: { type: "string" }, instagram_id: { type: "string" }, titulo: { type: "string" }, corpo: { type: "string" }, descricao: { type: "string" }, url_destino: { type: "string" }, cta: { type: "string", description: "LEARN_MORE | SHOP_NOW | SIGN_UP | DOWNLOAD | GET_QUOTE | CONTACT_US | SEND_MESSAGE | WHATSAPP_MESSAGE" }, imagem_hash: { type: "string" }, video_id: { type: "string" }, formato: { type: "string", default: "SINGLE_IMAGE" }, carousel_cards: { type: "array", items: { type: "object" } }, url_parametros: { type: "string" } }, required: ["conta_id", "nome", "pagina_id", "corpo", "url_destino", "cta"] } },
+      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" } }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: false, description: "true = deixa a Meta escolher os posicionamentos automaticamente (Advantage+ Placements) | false (padrão) = usa só os posicionamentos manuais definidos, sem otimização automática" }, publico_advantage: { type: "boolean", default: false, description: "true = deixa a Meta expandir o público automaticamente (Advantage+ Audience) | false (padrão) = usa só o targeting definido, sem expansão" }, bid_amount: { type: "number" } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
+      { name: "criar_criativo", description: "Cria um criativo de anúncio. Por padrão, todas as otimizações de IA do Advantage+ Creative (correção de imagem, melhorias de texto, comentários automáticos, filtros/uncrop de vídeo, etc.) ficam desativadas.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, pagina_id: { type: "string" }, instagram_id: { type: "string" }, titulo: { type: "string" }, corpo: { type: "string" }, descricao: { type: "string" }, url_destino: { type: "string" }, cta: { type: "string", description: "LEARN_MORE | SHOP_NOW | SIGN_UP | DOWNLOAD | GET_QUOTE | CONTACT_US | SEND_MESSAGE | WHATSAPP_MESSAGE" }, imagem_hash: { type: "string" }, video_id: { type: "string" }, formato: { type: "string", default: "SINGLE_IMAGE" }, carousel_cards: { type: "array", items: { type: "object" } }, url_parametros: { type: "string" } }, required: ["conta_id", "nome", "pagina_id", "corpo", "url_destino", "cta"] } },
       { name: "criar_anuncio", description: "Cria um anúncio associando criativo a um conjunto. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, conjunto_id: { type: "string" }, nome: { type: "string" }, criativo_id: { type: "string" } }, required: ["conta_id", "conjunto_id", "nome", "criativo_id"] } },
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
       { name: "fazer_upload_video", description: "Upload de vídeo via URL para a biblioteca de vídeos da conta. O processamento na Meta é assíncrono — pode ser preciso aguardar antes do video_id ficar pronto para uso num criativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_video: { type: "string" }, nome: { type: "string" } }, required: ["conta_id", "url_video"] } },
+      { name: "fazer_upload_imagem_drive", description: "Baixa uma imagem diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de criativos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha (https://drive.google.com/file/d/.../view)" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
+      { name: "fazer_upload_video_drive", description: "Baixa um vídeo diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de vídeos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa. O processamento na Meta é assíncrono.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha" }, nome: { type: "string" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
       { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado. Para tipo=CUSTOMER_LIST, depois de criado usa 'adicionar_pessoas_publico' para carregar os contactos.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" }, customer_file_source: { type: "string", default: "USER_PROVIDED_ONLY", description: "Só para tipo=CUSTOMER_LIST: USER_PROVIDED_ONLY | PARTNER_PROVIDED_ONLY | BOTH_USER_AND_PARTNER_PROVIDED" } }, required: ["conta_id", "nome", "tipo"] } },
       { name: "adicionar_pessoas_publico", description: "Carrega contactos (emails e/ou telefones) para um público de lista de clientes (CUSTOMER_LIST) já criado. Os dados são normalizados e convertidos em hash SHA-256 aqui no servidor antes de seguirem para a Meta — nunca envies nem recebas de volta os dados em texto simples.", inputSchema: { type: "object", properties: { publico_id: { type: "string" }, emails: { type: "array", items: { type: "string" } }, telefones: { type: "array", items: { type: "string" } } }, required: ["publico_id"] } },
@@ -240,7 +335,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/campaigns`, b), null, 2) }] };
     }
     if (name === "criar_conjunto_anuncios") {
-      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = true, publico_advantage = true, bid_amount } = args;
+      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = false, publico_advantage = false, bid_amount } = args;
       const targeting = { age_min: idade_min, age_max: idade_max, geo_locations: { countries: paises } };
       targeting.targeting_automation = { advantage_audience: publico_advantage ? 1 : 0 };
       if (genero.length)           targeting.genders                   = genero;
@@ -285,7 +380,26 @@ function createMcpServer() {
         if (url_parametros) ld.url_tags   = url_parametros;
         spec.link_data = ld;
       }
-      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/adcreatives`, { name: nome, object_story_spec: spec }), null, 2) }] };
+      // Desativa por padrão as otimizações de "Advantage+ Creative" (IA). Desde a Marketing
+      // API v22.0 não existe mais um interruptor único — cada melhoria tem de ser desligada
+      // individualmente (o padrão da Meta é OPT_IN em todas, mesmo sem pedir nada). A lista
+      // aplicada depende do formato, porque nem todos os toggles existem em todos os formatos.
+      const OPT_OUT = { enroll_status: "OPT_OUT" };
+      const creativeFeatures = {
+        text_optimizations: OPT_OUT,
+        inline_comment: OPT_OUT,
+      };
+      if (formato === "SINGLE_IMAGE" || formato === "CAROUSEL") {
+        creativeFeatures.image_template  = OPT_OUT;
+        creativeFeatures.image_touchups  = OPT_OUT;
+      }
+      if (formato === "SINGLE_VIDEO") {
+        creativeFeatures.image_animation = OPT_OUT;
+        creativeFeatures.video_filter    = OPT_OUT;
+        creativeFeatures.video_uncrop    = OPT_OUT;
+      }
+      const b = { name: nome, object_story_spec: spec, degrees_of_freedom_spec: { creative_features_spec: creativeFeatures } };
+      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/adcreatives`, b), null, 2) }] };
     }
     if (name === "criar_anuncio") {
       const { conta_id, conjunto_id, nome, criativo_id } = args;
@@ -301,6 +415,26 @@ function createMcpServer() {
       const b = { file_url: url_video };
       if (nome) { b.name = nome; b.title = nome; }
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/advideos`, b), null, 2) }] };
+    }
+    if (name === "fazer_upload_imagem_drive") {
+      const { conta_id, drive_file_id_ou_url } = args;
+      try {
+        const ficheiro = await baixarFicheiroDrive(drive_file_id_ou_url);
+        const resultado = await metaPost(`${conta_id}/adimages`, { bytes: ficheiro.buffer.toString("base64") });
+        return { content: [{ type: "text", text: JSON.stringify({ origem: ficheiro.nome, resultado }, null, 2) }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
+      }
+    }
+    if (name === "fazer_upload_video_drive") {
+      const { conta_id, drive_file_id_ou_url, nome } = args;
+      try {
+        const ficheiro = await baixarFicheiroDrive(drive_file_id_ou_url);
+        const resultado = await metaPostMultipart(`${conta_id}/advideos`, nome ? { name: nome, title: nome } : {}, ficheiro);
+        return { content: [{ type: "text", text: JSON.stringify({ origem: ficheiro.nome, resultado }, null, 2) }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
+      }
     }
     if (name === "verificar_status_video") {
       const { video_id } = args;
