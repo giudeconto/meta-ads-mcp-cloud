@@ -22,11 +22,14 @@ const API_VERSION       = "v20.0";
 const BASE_URL          = `https://graph.facebook.com/${API_VERSION}`;
 const GOOGLE_SA_EMAIL       = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "";
 const GOOGLE_SA_PRIVATE_KEY = (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const GOOGLE_OAUTH_CLIENT_ID     = process.env.GOOGLE_OAUTH_CLIENT_ID || "";
+const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+const GOOGLE_OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN || "";
 
 if (!META_ACCESS_TOKEN) process.stderr.write("[meta-ads-escala] ERRO: META_ACCESS_TOKEN não definido.\n");
 if (!META_BUSINESS_ID)  process.stderr.write("[meta-ads-escala] ERRO: META_BUSINESS_ID não definido.\n");
 if (!APPROVAL_CODE)     process.stderr.write("[meta-ads-escala] AVISO: APPROVAL_CODE não definido — ativação de campanhas ficará bloqueada até ser configurado.\n");
-if (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY) process.stderr.write("[meta-ads-escala] AVISO: credenciais da service account do Google Drive não definidas — upload direto do Drive ficará indisponível.\n");
+if (!GOOGLE_OAUTH_REFRESH_TOKEN && (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY)) process.stderr.write("[meta-ads-escala] AVISO: nenhuma credencial do Google Drive configurada (nem service account, nem OAuth pessoal) — upload direto do Drive ficará indisponível.\n");
 
 // ─── Helpers Meta API ─────────────────────────────────────────────────────────
 async function metaGet(endpoint, params = {}) {
@@ -125,8 +128,32 @@ async function getGoogleAccessToken() {
   if (googleTokenCache.token && Date.now() < googleTokenCache.expiresAt - 60000) {
     return googleTokenCache.token;
   }
+
+  // Método 1 (preferido, quando configurado): OAuth pessoal com refresh token —
+  // não é afetado pela política "disable service account key creation", porque
+  // não é uma chave de service account.
+  if (GOOGLE_OAUTH_REFRESH_TOKEN && GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    const res = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: GOOGLE_OAUTH_REFRESH_TOKEN,
+        client_id: GOOGLE_OAUTH_CLIENT_ID,
+        client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+      }),
+    });
+    const data = await res.json();
+    if (!data.access_token) {
+      throw new Error(`Falha ao renovar o token OAuth do Google: ${JSON.stringify(data)}`);
+    }
+    googleTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    return data.access_token;
+  }
+
+  // Método 2 (alternativa): service account com chave JSON.
   if (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY) {
-    throw new Error("Credenciais da service account do Google Drive não configuradas (GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY).");
+    throw new Error("Nenhuma credencial do Google Drive configurada (nem OAuth pessoal, nem service account).");
   }
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
