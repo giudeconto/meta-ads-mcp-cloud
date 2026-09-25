@@ -11,7 +11,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 
 // ─── Configuração ─────────────────────────────────────────────────────────────
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
@@ -74,6 +74,21 @@ async function metaGetAll(endpoint, params = {}) {
   return { data: results };
 }
 
+// ─── Hashing de dados de clientes (públicos de lista) ─────────────────────────
+// A Meta exige que e-mails e telefones cheguem já em SHA-256 — nunca em texto
+// simples. Normalizamos exatamente como a Meta pede antes de fazer o hash:
+// e-mail em minúsculas e sem espaços; telefone só com dígitos (com indicativo
+// do país, sem "+", sem espaços/traços).
+function normalizarEmail(email) {
+  return String(email).trim().toLowerCase();
+}
+function normalizarTelefone(tel) {
+  return String(tel).replace(/[^0-9]/g, "");
+}
+function hashSha256(valor) {
+  return createHash("sha256").update(valor, "utf8").digest("hex");
+}
+
 // ─── Aprovação de ativação ────────────────────────────────────────────────────
 // Bloqueia qualquer mudança de status para ACTIVE que não venha com o código de
 // aprovação correto. Retorna uma mensagem de erro (string) se bloqueado, ou null se liberado.
@@ -115,7 +130,8 @@ function createMcpServer() {
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
       { name: "fazer_upload_video", description: "Upload de vídeo via URL para a biblioteca de vídeos da conta. O processamento na Meta é assíncrono — pode ser preciso aguardar antes do video_id ficar pronto para uso num criativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_video: { type: "string" }, nome: { type: "string" } }, required: ["conta_id", "url_video"] } },
       { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
-      { name: "criar_publico_personalizado", description: "Cria um público personalizado", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" } }, required: ["conta_id", "nome", "tipo"] } },
+      { name: "criar_publico_personalizado", description: "Cria um público personalizado. Para tipo=CUSTOMER_LIST, depois de criado usa 'adicionar_pessoas_publico' para carregar os contactos.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" }, customer_file_source: { type: "string", default: "USER_PROVIDED_ONLY", description: "Só para tipo=CUSTOMER_LIST: USER_PROVIDED_ONLY | PARTNER_PROVIDED_ONLY | BOTH_USER_AND_PARTNER_PROVIDED" } }, required: ["conta_id", "nome", "tipo"] } },
+      { name: "adicionar_pessoas_publico", description: "Carrega contactos (emails e/ou telefones) para um público de lista de clientes (CUSTOMER_LIST) já criado. Os dados são normalizados e convertidos em hash SHA-256 aqui no servidor antes de seguirem para a Meta — nunca envies nem recebas de volta os dados em texto simples.", inputSchema: { type: "object", properties: { publico_id: { type: "string" }, emails: { type: "array", items: { type: "string" } }, telefones: { type: "array", items: { type: "string" } } }, required: ["publico_id"] } },
       { name: "criar_publico_semelhante", description: "Cria um público Lookalike", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, publico_origem_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, tamanho: { type: "number", default: 1 }, nome: { type: "string" } }, required: ["conta_id", "publico_origem_id", "paises", "nome"] } },
       // GESTÃO
       { name: "atualizar_campanha", description: "Atualiza uma campanha. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, limite_gasto: { type: "number" }, data_fim: { type: "string" } }, required: ["campanha_id"] } },
@@ -277,7 +293,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaGet(`${video_id}`, { fields: "id,title,status" }), null, 2) }] };
     }
     if (name === "criar_publico_personalizado") {
-      const { conta_id, nome, descricao, tipo, pixel_id, retencao_dias = 30, engagement_tipo, engagement_id } = args;
+      const { conta_id, nome, descricao, tipo, pixel_id, retencao_dias = 30, engagement_tipo, engagement_id, customer_file_source } = args;
       const b = { name: nome, subtype: tipo };
       if (descricao) b.description = descricao;
       if (tipo === "WEBSITE" && pixel_id) {
@@ -285,7 +301,29 @@ function createMcpServer() {
         b.rule = JSON.stringify({ inclusions: { operator: "or", rules: [{ event_sources: [{ id: pixel_id, type: "pixel" }], retention_seconds: retencao_dias * 86400, filter: { operator: "and", filters: [{ field: "event", operator: "eq", value: "PageView" }] } }] } });
       }
       if (tipo === "ENGAGEMENT") { b.engagement_specs = [{ action_type: engagement_tipo, id: engagement_id }]; b.retention_days = retencao_dias; }
+      if (tipo === "CUSTOMER_LIST") { b.customer_file_source = customer_file_source || "USER_PROVIDED_ONLY"; }
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/customaudiences`, b), null, 2) }] };
+    }
+    if (name === "adicionar_pessoas_publico") {
+      const { publico_id, emails = [], telefones = [] } = args;
+      if (!emails.length && !telefones.length) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "Forneça pelo menos um email ou telefone." }, null, 2) }] };
+      }
+      // Schema declara os campos presentes, na mesma ordem em que aparecem em cada linha de 'data'.
+      const schema = [];
+      if (emails.length)     schema.push("EMAIL");
+      if (telefones.length)  schema.push("PHONE");
+      const linhas = Math.max(emails.length, telefones.length);
+      const data = [];
+      for (let i = 0; i < linhas; i++) {
+        const linha = [];
+        if (emails.length)    linha.push(emails[i]    ? hashSha256(normalizarEmail(emails[i]))       : "");
+        if (telefones.length) linha.push(telefones[i] ? hashSha256(normalizarTelefone(telefones[i])) : "");
+        data.push(linha);
+      }
+      const resultado = await metaPost(`${publico_id}/users`, { payload: JSON.stringify({ schema, data }) });
+      // Nunca ecoar os valores originais de volta — só confirmação e contagem.
+      return { content: [{ type: "text", text: JSON.stringify({ publico_id, contactos_enviados: linhas, resultado }, null, 2) }] };
     }
     if (name === "criar_publico_semelhante") {
       const { conta_id, publico_origem_id, paises, tamanho = 1, nome } = args;
