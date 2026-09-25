@@ -407,24 +407,17 @@ function createMcpServer() {
         if (url_parametros) ld.url_tags   = url_parametros;
         spec.link_data = ld;
       }
-      // Desativa por padrão as otimizações de "Advantage+ Creative" (IA). Desde a Marketing
-      // API v22.0 não existe mais um interruptor único — cada melhoria tem de ser desligada
-      // individualmente (o padrão da Meta é OPT_IN em todas, mesmo sem pedir nada). A lista
-      // aplicada depende do formato, porque nem todos os toggles existem em todos os formatos.
+      // Desativa por padrão as otimizações de "Advantage+ Creative" (IA). A Meta exige os
+      // nomes das chaves em MAIÚSCULAS e só aceita um conjunto específico — confirmado
+      // diretamente pela resposta de erro da própria API (nesta versão/conta), já que a
+      // documentação pública descreve nomes diferentes (minúsculas) que não são aceites aqui.
       const OPT_OUT = { enroll_status: "OPT_OUT" };
       const creativeFeatures = {
-        text_optimizations: OPT_OUT,
-        inline_comment: OPT_OUT,
+        IMAGE_ANIMATION: OPT_OUT,
+        IG_VIDEO_NATIVE_SUBTITLE: OPT_OUT,
+        TEXT_OVERLAY_TRANSLATION: OPT_OUT,
+        STANDARD_ENHANCEMENTS_CATALOG: OPT_OUT,
       };
-      if (formato === "SINGLE_IMAGE" || formato === "CAROUSEL") {
-        creativeFeatures.image_template  = OPT_OUT;
-        creativeFeatures.image_touchups  = OPT_OUT;
-      }
-      if (formato === "SINGLE_VIDEO") {
-        creativeFeatures.image_animation = OPT_OUT;
-        creativeFeatures.video_filter    = OPT_OUT;
-        creativeFeatures.video_uncrop    = OPT_OUT;
-      }
       const b = { name: nome, object_story_spec: spec, degrees_of_freedom_spec: { creative_features_spec: creativeFeatures } };
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/adcreatives`, b), null, 2) }] };
     }
