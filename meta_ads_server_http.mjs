@@ -481,7 +481,11 @@ function createMcpServer() {
       // valor amigável na ferramenta, mas a API só aceita "CUSTOM" (o customer_file_source
       // é quem distingue que a origem é uma lista carregada).
       const subtypeReal = tipo === "CUSTOMER_LIST" ? "CUSTOM" : tipo;
-      const b = { name: nome, subtype: subtypeReal };
+      const b = { name: nome };
+      // Para públicos de site (WEBSITE), a Meta passou a rejeitar o parâmetro "subtype"
+      // quando se envia a "rule" — o "rule" já identifica sozinho que é um público de site.
+      // Para os outros tipos (CUSTOMER_LIST, ENGAGEMENT), o subtype continua a ser exigido.
+      if (tipo !== "WEBSITE") b.subtype = subtypeReal;
       if (descricao) b.description = descricao;
       if (tipo === "WEBSITE" && pixel_id) {
         b.pixel_id = pixel_id; b.retention_days = retencao_dias;
