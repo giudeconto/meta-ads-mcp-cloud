@@ -59,6 +59,19 @@ async function metaPost(endpoint, body = {}) {
   }
 }
 
+async function metaDelete(endpoint) {
+  const url = `${BASE_URL}/${endpoint}?access_token=${encodeURIComponent(META_ACCESS_TOKEN)}`;
+  try {
+    const res  = await fetch(url, { method: "DELETE" });
+    const data = await res.json();
+    if (data.error) process.stderr.write(`[meta-ads-escala] Erro DELETE: ${JSON.stringify(data.error)}\n`);
+    return data;
+  } catch (e) {
+    process.stderr.write(`[meta-ads-escala] Erro fetch DELETE: ${e.message}\n`);
+    return { error: e.message };
+  }
+}
+
 async function metaGetAll(endpoint, params = {}) {
   const results = [];
   let data = await metaGet(endpoint, { ...params, limit: "200" });
@@ -132,6 +145,7 @@ function createMcpServer() {
       { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado. Para tipo=CUSTOMER_LIST, depois de criado usa 'adicionar_pessoas_publico' para carregar os contactos.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" }, customer_file_source: { type: "string", default: "USER_PROVIDED_ONLY", description: "Só para tipo=CUSTOMER_LIST: USER_PROVIDED_ONLY | PARTNER_PROVIDED_ONLY | BOTH_USER_AND_PARTNER_PROVIDED" } }, required: ["conta_id", "nome", "tipo"] } },
       { name: "adicionar_pessoas_publico", description: "Carrega contactos (emails e/ou telefones) para um público de lista de clientes (CUSTOMER_LIST) já criado. Os dados são normalizados e convertidos em hash SHA-256 aqui no servidor antes de seguirem para a Meta — nunca envies nem recebas de volta os dados em texto simples.", inputSchema: { type: "object", properties: { publico_id: { type: "string" }, emails: { type: "array", items: { type: "string" } }, telefones: { type: "array", items: { type: "string" } } }, required: ["publico_id"] } },
+      { name: "apagar_publico", description: "Apaga um público personalizado (custom audience) pelo ID", inputSchema: { type: "object", properties: { publico_id: { type: "string" } }, required: ["publico_id"] } },
       { name: "criar_publico_semelhante", description: "Cria um público Lookalike", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, publico_origem_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, tamanho: { type: "number", default: 1 }, nome: { type: "string" } }, required: ["conta_id", "publico_origem_id", "paises", "nome"] } },
       // GESTÃO
       { name: "atualizar_campanha", description: "Atualiza uma campanha. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, limite_gasto: { type: "number" }, data_fim: { type: "string" } }, required: ["campanha_id"] } },
@@ -328,6 +342,10 @@ function createMcpServer() {
       const resultado = await metaPost(`${publico_id}/users`, { payload: JSON.stringify({ schema, data }) });
       // Nunca ecoar os valores originais de volta — só confirmação e contagem.
       return { content: [{ type: "text", text: JSON.stringify({ publico_id, contactos_enviados: linhas, resultado }, null, 2) }] };
+    }
+    if (name === "apagar_publico") {
+      const { publico_id } = args;
+      return { content: [{ type: "text", text: JSON.stringify(await metaDelete(`${publico_id}`), null, 2) }] };
     }
     if (name === "criar_publico_semelhante") {
       const { conta_id, publico_origem_id, paises, tamanho = 1, nome } = args;
