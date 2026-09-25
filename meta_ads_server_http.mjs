@@ -294,7 +294,11 @@ function createMcpServer() {
     }
     if (name === "criar_publico_personalizado") {
       const { conta_id, nome, descricao, tipo, pixel_id, retencao_dias = 30, engagement_tipo, engagement_id, customer_file_source } = args;
-      const b = { name: nome, subtype: tipo };
+      // A Meta renomeou o subtype de listas de clientes: aceitamos "CUSTOMER_LIST" como
+      // valor amigável na ferramenta, mas a API só aceita "CUSTOM" (o customer_file_source
+      // é quem distingue que a origem é uma lista carregada).
+      const subtypeReal = tipo === "CUSTOMER_LIST" ? "CUSTOM" : tipo;
+      const b = { name: nome, subtype: subtypeReal };
       if (descricao) b.description = descricao;
       if (tipo === "WEBSITE" && pixel_id) {
         b.pixel_id = pixel_id; b.retention_days = retencao_dias;
