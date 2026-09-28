@@ -25,6 +25,7 @@ const GOOGLE_SA_PRIVATE_KEY = (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY ||
 const GOOGLE_OAUTH_CLIENT_ID     = process.env.GOOGLE_OAUTH_CLIENT_ID || "";
 const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
 const GOOGLE_OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN || "";
+const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
 
 if (!META_ACCESS_TOKEN) process.stderr.write("[meta-ads-escala] ERRO: META_ACCESS_TOKEN não definido.\n");
 if (!META_BUSINESS_ID)  process.stderr.write("[meta-ads-escala] ERRO: META_BUSINESS_ID não definido.\n");
@@ -207,6 +208,32 @@ async function baixarFicheiroDrive(idOuUrl) {
   return { buffer: Buffer.from(arrayBuffer), nome: meta.name, mimeType: meta.mimeType };
 }
 
+// ─── Frame.io (developer token legacy, API v2) ────────────────────────────────
+// Aceita tanto um asset_id puro como um link de partilha do Frame.io
+// (https://next.frame.io/share/<share_id>/view/<asset_id>) — o segmento depois
+// de "/view/" é o próprio asset_id, utilizável diretamente na API v2.
+function extrairFrameioAssetId(idOuUrl) {
+  const m = String(idOuUrl).match(/\/view\/([a-zA-Z0-9-]{20,})/);
+  return m ? m[1] : idOuUrl;
+}
+
+async function baixarFicheiroFrameio(idOuUrl) {
+  if (!FRAMEIO_TOKEN) throw new Error("Token do Frame.io não configurado (FRAMEIO_TOKEN).");
+  const assetId = extrairFrameioAssetId(idOuUrl);
+  const res = await fetch(`https://api.frame.io/v2/assets/${assetId}?include=media_links.original`, {
+    headers: { Authorization: `Bearer ${FRAMEIO_TOKEN}` },
+  });
+  const asset = await res.json();
+  if (!res.ok || asset.error) throw new Error(`Erro ao ler o ficheiro do Frame.io: ${JSON.stringify(asset.error || asset)}`);
+  const downloadUrl = asset.media_links?.original?.download_url;
+  if (!downloadUrl) throw new Error("O Frame.io não devolveu um link de download para este ficheiro (pode ainda estar a processar).");
+
+  const fileRes = await fetch(downloadUrl);
+  if (!fileRes.ok) throw new Error(`Erro ao baixar o ficheiro do Frame.io (HTTP ${fileRes.status}).`);
+  const arrayBuffer = await fileRes.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), nome: asset.name, mimeType: asset.filetype || "video/mp4" };
+}
+
 
 // A Meta exige que e-mails e telefones cheguem já em SHA-256 — nunca em texto
 // simples. Normalizamos exatamente como a Meta pede antes de fazer o hash:
@@ -265,6 +292,7 @@ function createMcpServer() {
       { name: "fazer_upload_imagem_drive", description: "Baixa uma imagem diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de criativos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha (https://drive.google.com/file/d/.../view)" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
       { name: "verificar_app_token", description: "Diagnóstico: mostra a qual App do Meta for Developers o token da Escala Ads está associado.", inputSchema: { type: "object", properties: {} } },
       { name: "fazer_upload_video_drive", description: "Baixa um vídeo diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de vídeos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa. O processamento na Meta é assíncrono.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha" }, nome: { type: "string" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
+      { name: "fazer_upload_video_frameio", description: "Baixa um vídeo diretamente do Frame.io (por asset_id ou link de partilha next.frame.io/share/.../view/...) e sobe para a biblioteca de vídeos da conta. Só funciona se o dono do token do Frame.io tiver acesso real ao projeto (não apenas a um link de partilha recebido de terceiros).", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, frameio_id_ou_url: { type: "string", description: "asset_id do Frame.io, ou o link completo de partilha (https://next.frame.io/share/.../view/<asset_id>)" }, nome: { type: "string" } }, required: ["conta_id", "frameio_id_ou_url"] } },
       { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado. Para tipo=CUSTOMER_LIST, depois de criado usa 'adicionar_pessoas_publico' para carregar os contactos.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" }, customer_file_source: { type: "string", default: "USER_PROVIDED_ONLY", description: "Só para tipo=CUSTOMER_LIST: USER_PROVIDED_ONLY | PARTNER_PROVIDED_ONLY | BOTH_USER_AND_PARTNER_PROVIDED" } }, required: ["conta_id", "nome", "tipo"] } },
       { name: "adicionar_pessoas_publico", description: "Carrega contactos (emails e/ou telefones) para um público de lista de clientes (CUSTOMER_LIST) já criado. Os dados são normalizados e convertidos em hash SHA-256 aqui no servidor antes de seguirem para a Meta — nunca envies nem recebas de volta os dados em texto simples.", inputSchema: { type: "object", properties: { publico_id: { type: "string" }, emails: { type: "array", items: { type: "string" } }, telefones: { type: "array", items: { type: "string" } } }, required: ["publico_id"] } },
@@ -465,6 +493,16 @@ function createMcpServer() {
       const { conta_id, drive_file_id_ou_url, nome } = args;
       try {
         const ficheiro = await baixarFicheiroDrive(drive_file_id_ou_url);
+        const resultado = await metaPostMultipart(`${conta_id}/advideos`, nome ? { name: nome, title: nome } : {}, ficheiro);
+        return { content: [{ type: "text", text: JSON.stringify({ origem: ficheiro.nome, resultado }, null, 2) }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
+      }
+    }
+    if (name === "fazer_upload_video_frameio") {
+      const { conta_id, frameio_id_ou_url, nome } = args;
+      try {
+        const ficheiro = await baixarFicheiroFrameio(frameio_id_ou_url);
         const resultado = await metaPostMultipart(`${conta_id}/advideos`, nome ? { name: nome, title: nome } : {}, ficheiro);
         return { content: [{ type: "text", text: JSON.stringify({ origem: ficheiro.nome, resultado }, null, 2) }] };
       } catch (e) {
