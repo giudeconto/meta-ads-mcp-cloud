@@ -226,6 +226,8 @@ async function frameioGet(url, extraHeaders = {}) {
   return { ok: res.ok, status: res.status, data };
 }
 
+function listaContasBruta(d) { return (d?.data || d?.results || []).map(c => ({ id: c.id, nome: c.display_name })); }
+
 async function obterFicheiroFrameio(idOuUrl) {
   if (!FRAMEIO_TOKEN) throw new Error("Token do Frame.io não configurado (FRAMEIO_TOKEN).");
   const assetId = extrairFrameioAssetId(idOuUrl);
@@ -233,13 +235,12 @@ async function obterFicheiroFrameio(idOuUrl) {
   const hV4 = { "x-frameio-legacy-token-auth": "true" };
 
   // 1) API V4
-  let contas = await frameioGet("https://api.frame.io/v4/accounts", hV4);
-  if (!contas.ok) contas = await frameioGet("https://api.frame.io/v4/me/accounts", hV4);
-  diag.push({ passo: "v4 listar contas", status: contas.status, erro: contas.ok ? undefined : contas.data });
+  const contas = await frameioGet("https://api.frame.io/v4/accounts", hV4);
+  diag.push({ passo: "v4 listar contas", status: contas.status, contas: contas.ok ? listaContasBruta(contas.data) : undefined, erro: contas.ok ? undefined : contas.data });
   const listaContas = contas.ok ? (contas.data?.data || contas.data?.results || []) : [];
   for (const c of listaContas) {
-    const r = await frameioGet(`https://api.frame.io/v4/accounts/${c.id}/files/${assetId}?include=media_links.original`, hV4);
-    diag.push({ passo: `v4 ficheiro na conta ${c.id}`, status: r.status });
+    const r = await frameioGet(`https://api.frame.io/v4/accounts/${c.id}/files/${assetId}?include=media_links.original`, { ...hV4, "api-version": "experimental" });
+    diag.push({ passo: `v4 ficheiro na conta ${c.id}`, status: r.status, erro: r.ok ? undefined : r.data });
     if (r.ok) {
       const f = r.data?.data || r.data;
       const downloadUrl = f?.media_links?.original?.download_url;
@@ -250,7 +251,7 @@ async function obterFicheiroFrameio(idOuUrl) {
 
   // 2) API v2 (contas antigas)
   const r2 = await frameioGet(`https://api.frame.io/v2/assets/${assetId}?include=media_links.original`);
-  diag.push({ passo: "v2 ficheiro", status: r2.status });
+  diag.push({ passo: "v2 ficheiro", status: r2.status, erro: r2.ok ? undefined : r2.data });
   if (r2.ok) {
     const downloadUrl = r2.data?.media_links?.original?.download_url;
     if (!downloadUrl) throw new Error("O Frame.io (v2) não devolveu um link de download para este ficheiro (pode ainda estar a processar).");
