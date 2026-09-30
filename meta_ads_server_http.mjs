@@ -425,7 +425,7 @@ function createMcpServer() {
     if (name === "criar_criativo") {
       const { conta_id, nome, pagina_id, instagram_id, titulo, corpo, descricao, url_destino, cta, imagem_hash, video_id, formato = "SINGLE_IMAGE", carousel_cards = [], url_parametros } = args;
       const spec = { page_id: pagina_id };
-      if (instagram_id) spec.instagram_actor_id = instagram_id;
+      if (instagram_id) spec.instagram_user_id = instagram_id;
       if (formato === "CAROUSEL") {
         spec.link_data = { link: url_destino, child_attachments: carousel_cards.map(card => ({ link: card.url_destino, name: card.titulo, description: card.descricao, image_hash: card.imagem_hash, call_to_action: { type: card.cta || cta, value: { link: card.url_destino } } })), call_to_action: { type: cta, value: { link: url_destino } } };
       } else if (formato === "SINGLE_VIDEO" && video_id) {
