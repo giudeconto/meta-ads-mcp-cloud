@@ -208,30 +208,55 @@ async function baixarFicheiroDrive(idOuUrl) {
   return { buffer: Buffer.from(arrayBuffer), nome: meta.name, mimeType: meta.mimeType };
 }
 
-// ─── Frame.io (developer token legacy, API v2) ────────────────────────────────
-// Aceita tanto um asset_id puro como um link de partilha do Frame.io
-// (https://next.frame.io/share/<share_id>/view/<asset_id>) — o segmento depois
-// de "/view/" é o próprio asset_id, utilizável diretamente na API v2.
+// ─── Frame.io (token legacy) ──────────────────────────────────────────────────
+// Aceita um asset_id puro ou um link de partilha
+// (https://next.frame.io/share/<share_id>/view/<file_id>) — o segmento depois de
+// "/view/" é o id do ficheiro. Tenta primeiro a API V4 (contas novas, links
+// next.frame.io) usando o token legacy com o cabeçalho x-frameio-legacy-token-auth,
+// e recorre à API v2 (contas antigas). Devolve um diagnóstico se ambas falharem.
 function extrairFrameioAssetId(idOuUrl) {
   const m = String(idOuUrl).match(/\/view\/([a-zA-Z0-9-]{20,})/);
   return m ? m[1] : idOuUrl;
 }
 
-async function baixarFicheiroFrameio(idOuUrl) {
+async function frameioGet(url, extraHeaders = {}) {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${FRAMEIO_TOKEN}`, ...extraHeaders } });
+  const texto = await res.text();
+  let data; try { data = JSON.parse(texto); } catch { data = { resposta: texto.slice(0, 300) }; }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function obterFicheiroFrameio(idOuUrl) {
   if (!FRAMEIO_TOKEN) throw new Error("Token do Frame.io não configurado (FRAMEIO_TOKEN).");
   const assetId = extrairFrameioAssetId(idOuUrl);
-  const res = await fetch(`https://api.frame.io/v2/assets/${assetId}?include=media_links.original`, {
-    headers: { Authorization: `Bearer ${FRAMEIO_TOKEN}` },
-  });
-  const asset = await res.json();
-  if (!res.ok || asset.error) throw new Error(`Erro ao ler o ficheiro do Frame.io: ${JSON.stringify(asset.error || asset)}`);
-  const downloadUrl = asset.media_links?.original?.download_url;
-  if (!downloadUrl) throw new Error("O Frame.io não devolveu um link de download para este ficheiro (pode ainda estar a processar).");
+  const diag = [];
+  const hV4 = { "x-frameio-legacy-token-auth": "true" };
 
-  const fileRes = await fetch(downloadUrl);
-  if (!fileRes.ok) throw new Error(`Erro ao baixar o ficheiro do Frame.io (HTTP ${fileRes.status}).`);
-  const arrayBuffer = await fileRes.arrayBuffer();
-  return { buffer: Buffer.from(arrayBuffer), nome: asset.name, mimeType: asset.filetype || "video/mp4" };
+  // 1) API V4
+  let contas = await frameioGet("https://api.frame.io/v4/accounts", hV4);
+  if (!contas.ok) contas = await frameioGet("https://api.frame.io/v4/me/accounts", hV4);
+  diag.push({ passo: "v4 listar contas", status: contas.status, erro: contas.ok ? undefined : contas.data });
+  const listaContas = contas.ok ? (contas.data?.data || contas.data?.results || []) : [];
+  for (const c of listaContas) {
+    const r = await frameioGet(`https://api.frame.io/v4/accounts/${c.id}/files/${assetId}?include=media_links.original`, hV4);
+    diag.push({ passo: `v4 ficheiro na conta ${c.id}`, status: r.status });
+    if (r.ok) {
+      const f = r.data?.data || r.data;
+      const downloadUrl = f?.media_links?.original?.download_url;
+      if (!downloadUrl) throw new Error("O Frame.io (V4) devolveu o ficheiro mas sem link de download do original (pode ainda estar a processar).");
+      return { downloadUrl, nome: f.name, mimeType: f.media_type || f.filetype || "video/mp4", tamanho: f.file_size, via: "v4" };
+    }
+  }
+
+  // 2) API v2 (contas antigas)
+  const r2 = await frameioGet(`https://api.frame.io/v2/assets/${assetId}?include=media_links.original`);
+  diag.push({ passo: "v2 ficheiro", status: r2.status });
+  if (r2.ok) {
+    const downloadUrl = r2.data?.media_links?.original?.download_url;
+    if (!downloadUrl) throw new Error("O Frame.io (v2) não devolveu um link de download para este ficheiro (pode ainda estar a processar).");
+    return { downloadUrl, nome: r2.data.name, mimeType: r2.data.filetype || "video/mp4", tamanho: r2.data.filesize, via: "v2" };
+  }
+  throw new Error(`Não foi possível ler o ficheiro do Frame.io. Diagnóstico: ${JSON.stringify(diag)}`);
 }
 
 
@@ -292,7 +317,7 @@ function createMcpServer() {
       { name: "fazer_upload_imagem_drive", description: "Baixa uma imagem diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de criativos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha (https://drive.google.com/file/d/.../view)" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
       { name: "verificar_app_token", description: "Diagnóstico: mostra a qual App do Meta for Developers o token da Escala Ads está associado.", inputSchema: { type: "object", properties: {} } },
       { name: "fazer_upload_video_drive", description: "Baixa um vídeo diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de vídeos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa. O processamento na Meta é assíncrono.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha" }, nome: { type: "string" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
-      { name: "fazer_upload_video_frameio", description: "Baixa um vídeo diretamente do Frame.io (por asset_id ou link de partilha next.frame.io/share/.../view/...) e sobe para a biblioteca de vídeos da conta. Só funciona se o dono do token do Frame.io tiver acesso real ao projeto (não apenas a um link de partilha recebido de terceiros).", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, frameio_id_ou_url: { type: "string", description: "asset_id do Frame.io, ou o link completo de partilha (https://next.frame.io/share/.../view/<asset_id>)" }, nome: { type: "string" } }, required: ["conta_id", "frameio_id_ou_url"] } },
+      { name: "fazer_upload_video_frameio", description: "Baixa um vídeo diretamente do Frame.io (por asset_id ou link de partilha next.frame.io/share/.../view/...) e sobe para a biblioteca de vídeos da conta. Usa a API V4 com o token legacy (e a v2 como alternativa). Só funciona se o dono do token tiver acesso real ao projeto.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, frameio_id_ou_url: { type: "string", description: "asset_id do Frame.io, ou o link completo de partilha (https://next.frame.io/share/.../view/<asset_id>)" }, nome: { type: "string" }, so_verificar: { type: "boolean", description: "Se true, só confirma que o Frame.io consegue ler o ficheiro (nome, tipo, tamanho) sem fazer upload" } }, required: ["conta_id", "frameio_id_ou_url"] } },
       { name: "verificar_status_video", description: "Verifica se um vídeo já terminou de processar e está pronto para ser usado num criativo", inputSchema: { type: "object", properties: { video_id: { type: "string" } }, required: ["video_id"] } },
       { name: "criar_publico_personalizado", description: "Cria um público personalizado. Para tipo=CUSTOMER_LIST, depois de criado usa 'adicionar_pessoas_publico' para carregar os contactos.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, descricao: { type: "string" }, tipo: { type: "string", description: "WEBSITE | CUSTOMER_LIST | ENGAGEMENT" }, pixel_id: { type: "string" }, retencao_dias: { type: "number", default: 30 }, engagement_tipo: { type: "string" }, engagement_id: { type: "string" }, customer_file_source: { type: "string", default: "USER_PROVIDED_ONLY", description: "Só para tipo=CUSTOMER_LIST: USER_PROVIDED_ONLY | PARTNER_PROVIDED_ONLY | BOTH_USER_AND_PARTNER_PROVIDED" } }, required: ["conta_id", "nome", "tipo"] } },
       { name: "adicionar_pessoas_publico", description: "Carrega contactos (emails e/ou telefones) para um público de lista de clientes (CUSTOMER_LIST) já criado. Os dados são normalizados e convertidos em hash SHA-256 aqui no servidor antes de seguirem para a Meta — nunca envies nem recebas de volta os dados em texto simples.", inputSchema: { type: "object", properties: { publico_id: { type: "string" }, emails: { type: "array", items: { type: "string" } }, telefones: { type: "array", items: { type: "string" } } }, required: ["publico_id"] } },
@@ -502,11 +527,18 @@ function createMcpServer() {
       }
     }
     if (name === "fazer_upload_video_frameio") {
-      const { conta_id, frameio_id_ou_url, nome } = args;
+      const { conta_id, frameio_id_ou_url, nome, so_verificar } = args;
       try {
-        const ficheiro = await baixarFicheiroFrameio(frameio_id_ou_url);
-        const resultado = await metaPostMultipart(`${conta_id}/advideos`, nome ? { name: nome, title: nome } : {}, ficheiro);
-        return { content: [{ type: "text", text: JSON.stringify({ origem: ficheiro.nome, resultado }, null, 2) }] };
+        const f = await obterFicheiroFrameio(frameio_id_ou_url);
+        if (so_verificar) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: true, via: f.via, nome: f.nome, tipo: f.mimeType, tamanho_bytes: f.tamanho }, null, 2) }] };
+        }
+        // A Meta descarrega diretamente do link (evita falhas em ficheiros grandes).
+        const b = { file_url: f.downloadUrl };
+        const titulo = nome || f.nome;
+        if (titulo) { b.name = titulo; b.title = titulo; }
+        const resultado = await metaPost(`${conta_id}/advideos`, b);
+        return { content: [{ type: "text", text: JSON.stringify({ origem: f.nome, via: f.via, resultado }, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
       }
