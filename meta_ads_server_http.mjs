@@ -336,7 +336,7 @@ function createMcpServer() {
     }
     if (name === "listar_anuncios") {
       const { id } = args;
-      return { content: [{ type: "text", text: JSON.stringify(await metaGetAll(`${id}/ads`, { fields: "id,name,status,creative{id,name,title,body,image_url},adset_id,campaign_id" }), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await metaGetAll(`${id}/ads`, { fields: "id,name,status,creative{id,name,title,body,image_url,object_story_spec,asset_feed_spec,url_tags,call_to_action_type},adset_id,campaign_id" }), null, 2) }] };
     }
     if (name === "listar_publicos") {
       const { conta_id } = args;
