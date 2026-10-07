@@ -33,18 +33,37 @@ if (!APPROVAL_CODE)     process.stderr.write("[meta-ads-escala] AVISO: APPROVAL_
 if (!GOOGLE_OAUTH_REFRESH_TOKEN && (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY)) process.stderr.write("[meta-ads-escala] AVISO: nenhuma credencial do Google Drive configurada (nem service account, nem OAuth pessoal) — upload direto do Drive ficará indisponível.\n");
 
 // ─── Helpers Meta API ─────────────────────────────────────────────────────────
-async function metaGet(endpoint, params = {}) {
+// Erros que a Meta costuma devolver de forma intermitente — vale a pena repetir o pedido.
+// (1 = "reduce the amount of data", 2 = serviço temporariamente indisponível, 4/17/32/613 = limites
+//  de chamadas, 341/368 = bloqueios temporários; #200 "Provide valid app ID" também aparece de
+//  forma esporádica quando a Meta tem instabilidade.)
+function erroTransitorio(err) {
+  if (!err || typeof err !== "object") return false;
+  if ([1, 2, 4, 17, 32, 341, 368, 613].includes(err.code)) return true;
+  if (err.code === 200 && /valid app id/i.test(err.message || "")) return true;
+  return false;
+}
+const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function metaGet(endpoint, params = {}, tentativas = 3) {
   params.access_token = META_ACCESS_TOKEN;
   const query = new URLSearchParams(params).toString();
   const url   = `${BASE_URL}/${endpoint}?${query}`;
-  try {
-    const res  = await fetch(url);
-    const data = await res.json();
-    if (data.error) process.stderr.write(`[meta-ads-escala] Erro GET: ${JSON.stringify(data.error)}\n`);
-    return data;
-  } catch (e) {
-    process.stderr.write(`[meta-ads-escala] Erro fetch: ${e.message}\n`);
-    return { error: e.message };
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      const res  = await fetch(url);
+      const data = await res.json();
+      if (data.error) {
+        process.stderr.write(`[meta-ads-escala] Erro GET (tentativa ${i + 1}/${tentativas}): ${JSON.stringify(data.error)}\n`);
+        // O erro code 1 só se resolve com páginas menores — quem chama (metaGetAll) trata disso.
+        if (data.error.code !== 1 && erroTransitorio(data.error) && i < tentativas - 1) { await dormir(700 * (i + 1)); continue; }
+      }
+      return data;
+    } catch (e) {
+      process.stderr.write(`[meta-ads-escala] Erro fetch (tentativa ${i + 1}/${tentativas}): ${e.message}\n`);
+      if (i < tentativas - 1) { await dormir(700 * (i + 1)); continue; }
+      return { error: { message: e.message } };
+    }
   }
 }
 
@@ -102,17 +121,30 @@ async function metaPostMultipart(endpoint, fields = {}, ficheiro) {
 
 async function metaGetAll(endpoint, params = {}) {
   const results = [];
-  let data = await metaGet(endpoint, { ...params, limit: "200" });
+  // Páginas de 200 itens com campos pesados (ex: balance, insights) fazem a Meta recusar com
+  // "Please reduce the amount of data". Começamos em 50 e, se a Meta pedir, vamos reduzindo.
+  let data;
+  let limitUsado = 50;
+  for (const lim of [50, 25, 10]) {
+    limitUsado = lim;
+    data = await metaGet(endpoint, { ...params, limit: String(lim) });
+    if (!(data.error && data.error.code === 1)) break;
+  }
   if (data.error) return data;
   results.push(...(data.data || []));
+  let aviso;
   while (data.paging?.next) {
     const next       = new URL(data.paging.next);
     const nextParams = Object.fromEntries(next.searchParams.entries());
     data = await metaGet(endpoint, nextParams);
-    if (data.error) break;
+    if (data.error) {
+      // Não escondemos o problema: devolvemos o que já temos e dizemos claramente que ficou incompleto.
+      aviso = `Lista possivelmente incompleta — a Meta devolveu erro a meio da paginação: ${data.error.message || JSON.stringify(data.error)}`;
+      break;
+    }
     results.push(...(data.data || []));
   }
-  return { data: results };
+  return aviso ? { data: results, aviso } : { data: results };
 }
 
 // ─── Google Drive (service account) ───────────────────────────────────────────
@@ -346,7 +378,18 @@ function createMcpServer() {
         metaGetAll(`${META_BUSINESS_ID}/client_ad_accounts`, { fields: "id,name,account_status,currency,amount_spent,balance,timezone_name" }),
       ]);
       const todas = Object.values([...(o.data || []), ...(c.data || [])].reduce((a, x) => { a[x.id] = x; return a; }, {}));
-      return { content: [{ type: "text", text: JSON.stringify({ data: todas, total: todas.length }, null, 2) }] };
+      // Antes, se a Meta devolvesse erro, isto aparecia como uma lista vazia sem explicação.
+      const problemas = [
+        o.error && `owned_ad_accounts: ${o.error.message || JSON.stringify(o.error)}`,
+        c.error && `client_ad_accounts: ${c.error.message || JSON.stringify(c.error)}`,
+        o.aviso, c.aviso,
+      ].filter(Boolean);
+      if (!todas.length && problemas.length) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "A Meta devolveu erro ao listar as contas — não é que não existam contas.", detalhes: problemas }, null, 2) }] };
+      }
+      const resposta = { data: todas, total: todas.length };
+      if (problemas.length) resposta.aviso = problemas;
+      return { content: [{ type: "text", text: JSON.stringify(resposta, null, 2) }] };
     }
     if (name === "listar_campanhas") {
       const { conta_id, status = "ALL" } = args;
@@ -397,13 +440,21 @@ function createMcpServer() {
       for (const conta of todas) {
         if (conta.account_status !== 1) continue;
         const ins = await metaGet(`${conta.id}/insights`, { fields: "account_name,impressions,clicks,spend,reach,cpc,cpm,ctr,actions,purchase_roas", date_preset: periodo, level: "account" });
-        res.push({ conta: conta.name, id: conta.id, insights: ins.data || [] });
+        const item = { conta: conta.name, id: conta.id, insights: ins.data || [] };
+        if (ins.error) item.erro = ins.error.message || JSON.stringify(ins.error);
+        res.push(item);
       }
-      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+      const falhadas = res.filter(r => r.erro).length;
+      if (!todas.length && (o.error || c.error)) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "A Meta devolveu erro ao listar as contas.", detalhes: [o.error?.message, c.error?.message].filter(Boolean) }, null, 2) }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(falhadas ? { aviso: `${falhadas} conta(s) devolveram erro da Meta — ver campo "erro" em cada uma.`, contas: res } : res, null, 2) }] };
     }
     if (name === "metricas_conta_por_campanha") {
       const { conta_id, periodo = "last_30d" } = args;
-      return { content: [{ type: "text", text: JSON.stringify(await metaGet(`${conta_id}/insights`, { fields: "campaign_name,campaign_id,impressions,clicks,spend,reach,frequency,cpc,cpm,ctr,actions,cost_per_action_type,purchase_roas", date_preset: periodo, level: "campaign", limit: "200" }), null, 2) }] };
+      // metaGetAll pagina com páginas pequenas e reduz sozinho o tamanho se a Meta recusar
+      // ("Please reduce the amount of data"), em vez de pedir 200 campanhas de uma vez.
+      return { content: [{ type: "text", text: JSON.stringify(await metaGetAll(`${conta_id}/insights`, { fields: "campaign_name,campaign_id,impressions,clicks,spend,reach,frequency,cpc,cpm,ctr,actions,cost_per_action_type,purchase_roas", date_preset: periodo, level: "campaign" }), null, 2) }] };
     }
     if (name === "criar_campanha") {
       const { conta_id, nome, objetivo, orcamento_diario, orcamento_total, data_inicio, data_fim, limite_gasto, bid_strategy, special_ad_categories = [] } = args;
