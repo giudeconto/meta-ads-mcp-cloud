@@ -19,6 +19,13 @@ const META_BUSINESS_ID  = process.env.META_BUSINESS_ID  || "";
 const APPROVAL_CODE     = process.env.APPROVAL_CODE || "";
 const PORT              = process.env.PORT || 3000;
 const API_VERSION       = "v20.0";
+// Padrão da Escala Ads para a janela de atribuição de TODO conjunto de anúncios novo:
+// 1 dia de clique + 1 dia de visualização + 1 dia de engajamento.
+const ATRIBUICAO_PADRAO = [
+  { event_type: "CLICK_THROUGH",      window_days: 1 },
+  { event_type: "VIEW_THROUGH",       window_days: 1 },
+  { event_type: "ENGAGED_VIDEO_VIEW", window_days: 1 },
+];
 const BASE_URL          = `https://graph.facebook.com/${API_VERSION}`;
 const GOOGLE_SA_EMAIL       = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "";
 const GOOGLE_SA_PRIVATE_KEY = (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n");
@@ -342,12 +349,13 @@ function createMcpServer() {
       { name: "metricas_conta_por_campanha", description: "Métricas por campanha dentro de uma conta", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, periodo: { type: "string", default: "last_30d" } }, required: ["conta_id"] } },
       // CRIAÇÃO
       { name: "criar_campanha", description: "Cria uma nova campanha. É SEMPRE criada em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, objetivo: { type: "string", description: "OUTCOME_AWARENESS | OUTCOME_TRAFFIC | OUTCOME_ENGAGEMENT | OUTCOME_LEADS | OUTCOME_APP_PROMOTION | OUTCOME_SALES" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, limite_gasto: { type: "number" }, bid_strategy: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } } }, required: ["conta_id", "nome", "objetivo"] } },
-      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" }, description: "Interesses para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_interesses" }, comportamentos: { type: "array", items: { type: "object" }, description: "Comportamentos para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_comportamentos" }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: false, description: "true = deixa a Meta escolher os posicionamentos automaticamente (Advantage+ Placements) | false (padrão) = usa só os posicionamentos manuais definidos, sem otimização automática" }, publico_advantage: { type: "boolean", default: false, description: "true = deixa a Meta expandir o público automaticamente (Advantage+ Audience) | false (padrão) = usa só o targeting definido, sem expansão" }, bid_amount: { type: "number" }, targeting_extra: { type: "object", description: "Campos adicionais de targeting da Meta, para replicar fielmente um conjunto existente. Ex: { \"age_range\": [23, 55] } (sugestão de idade do Advantage+ Audience), { \"brand_safety_content_filter_levels\": [\"FACEBOOK_RELAXED\", \"AN_RELAXED\"] } (filtro de inventário), { \"geo_locations\": { \"location_types\": [\"home\", \"recent\", \"frequently_in\"] } } (tipos de localização — é combinado com os países, não os substitui)." } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
+      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo. A atribuição fica por padrão em 1 dia clique + 1 dia visualização + 1 dia engajamento (padrão Escala Ads) e a resposta mostra a atribuição que a Meta realmente guardou.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" }, description: "Interesses para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_interesses" }, comportamentos: { type: "array", items: { type: "object" }, description: "Comportamentos para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_comportamentos" }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: false, description: "true = deixa a Meta escolher os posicionamentos automaticamente (Advantage+ Placements) | false (padrão) = usa só os posicionamentos manuais definidos, sem otimização automática" }, publico_advantage: { type: "boolean", default: false, description: "true = deixa a Meta expandir o público automaticamente (Advantage+ Audience) | false (padrão) = usa só o targeting definido, sem expansão" }, bid_amount: { type: "number" }, atribuicao: { type: "array", items: { type: "object" }, description: "Janela de atribuição do conjunto — lista de { event_type, window_days }. PADRÃO Escala Ads (já aplicado se não for dado): 1 dia clique + 1 dia visualização + 1 dia engajamento. Só preencher para casos excecionais pedidos expressamente." }, targeting_extra: { type: "object", description: "Campos adicionais de targeting da Meta, para replicar fielmente um conjunto existente. Ex: { \"age_range\": [23, 55] } (sugestão de idade do Advantage+ Audience), { \"brand_safety_content_filter_levels\": [\"FACEBOOK_RELAXED\", \"AN_RELAXED\"] } (filtro de inventário), { \"geo_locations\": { \"location_types\": [\"home\", \"recent\", \"frequently_in\"] } } (tipos de localização — é combinado com os países, não os substitui)." } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
       { name: "criar_criativo", description: "Cria um criativo de anúncio. Por padrão, todas as otimizações de IA do Advantage+ Creative (correção de imagem, melhorias de texto, comentários automáticos, filtros/uncrop de vídeo, etc.) ficam desativadas.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, pagina_id: { type: "string" }, instagram_id: { type: "string" }, titulo: { type: "string" }, corpo: { type: "string" }, descricao: { type: "string" }, url_destino: { type: "string" }, cta: { type: "string", description: "LEARN_MORE | SHOP_NOW | SIGN_UP | DOWNLOAD | GET_QUOTE | CONTACT_US | SEND_MESSAGE | WHATSAPP_MESSAGE" }, imagem_hash: { type: "string" }, video_id: { type: "string" }, formato: { type: "string", default: "SINGLE_IMAGE" }, carousel_cards: { type: "array", items: { type: "object" } }, url_parametros: { type: "string" } }, required: ["conta_id", "nome", "pagina_id", "corpo", "url_destino", "cta"] } },
       { name: "criar_anuncio", description: "Cria um anúncio associando criativo a um conjunto. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, conjunto_id: { type: "string" }, nome: { type: "string" }, criativo_id: { type: "string" } }, required: ["conta_id", "conjunto_id", "nome", "criativo_id"] } },
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
       { name: "fazer_upload_video", description: "Upload de vídeo via URL para a biblioteca de vídeos da conta. O processamento na Meta é assíncrono — pode ser preciso aguardar antes do video_id ficar pronto para uso num criativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_video: { type: "string" }, nome: { type: "string" } }, required: ["conta_id", "url_video"] } },
       { name: "fazer_upload_imagem_drive", description: "Baixa uma imagem diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de criativos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha (https://drive.google.com/file/d/.../view)" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
+      { name: "verificar_permissoes_contas", description: "Diagnóstico (só leitura): mostra em que contas de anúncios o utilizador de sistema da Escala Ads tem permissão para CRIAR/EDITAR (tarefas ADVERTISE ou MANAGE) e em quais só tem leitura (ANALYZE). Serve para descobrir, antes de os gestores falharem, que contas precisam de 'Gerir campanhas' atribuído em Definições do negócio. Sem conta_id, audita todas as contas.", inputSchema: { type: "object", properties: { conta_id: { type: "string", description: "Opcional — verificar só esta conta (act_...)" } } } },
       { name: "verificar_app_token", description: "Diagnóstico: mostra a qual App do Meta for Developers o token da Escala Ads está associado.", inputSchema: { type: "object", properties: {} } },
       { name: "fazer_upload_video_drive", description: "Baixa um vídeo diretamente do Google Drive (por ID do ficheiro ou link de partilha) e sobe para a biblioteca de vídeos da conta — sem precisar de URL pública nem de passar o ficheiro pela conversa. O processamento na Meta é assíncrono.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, drive_file_id_ou_url: { type: "string", description: "ID do ficheiro no Drive, ou o link completo de partilha" }, nome: { type: "string" } }, required: ["conta_id", "drive_file_id_ou_url"] } },
       { name: "fazer_upload_video_frameio", description: "Baixa um vídeo diretamente do Frame.io (por asset_id ou link de partilha next.frame.io/share/.../view/...) e sobe para a biblioteca de vídeos da conta. Usa a API V4 com o token legacy (e a v2 como alternativa). Só funciona se o dono do token tiver acesso real ao projeto.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, frameio_id_ou_url: { type: "string", description: "asset_id do Frame.io, ou o link completo de partilha (https://next.frame.io/share/.../view/<asset_id>)" }, nome: { type: "string" }, so_verificar: { type: "boolean", description: "Se true, só confirma que o Frame.io consegue ler o ficheiro (nome, tipo, tamanho) sem fazer upload" } }, required: ["conta_id", "frameio_id_ou_url"] } },
@@ -399,7 +407,7 @@ function createMcpServer() {
     }
     if (name === "listar_conjuntos_anuncios") {
       const { campanha_id, status = "ALL" } = args;
-      const p = { fields: "id,name,status,daily_budget,lifetime_budget,targeting,optimization_goal,billing_event,bid_amount,start_time,end_time,promoted_object" };
+      const p = { fields: "id,name,status,daily_budget,lifetime_budget,targeting,optimization_goal,billing_event,bid_amount,start_time,end_time,promoted_object,attribution_spec" };
       if (status !== "ALL") p.effective_status = JSON.stringify([status]);
       return { content: [{ type: "text", text: JSON.stringify(await metaGetAll(`${campanha_id}/adsets`, p), null, 2) }] };
     }
@@ -469,7 +477,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/campaigns`, b), null, 2) }] };
     }
     if (name === "criar_conjunto_anuncios") {
-      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], comportamentos = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = false, publico_advantage = false, bid_amount, targeting_extra } = args;
+      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], comportamentos = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = false, publico_advantage = false, bid_amount, targeting_extra, atribuicao } = args;
       const targeting = { age_min: idade_min, age_max: idade_max, geo_locations: { countries: paises } };
       targeting.targeting_automation = { advantage_audience: publico_advantage ? 1 : 0 };
       if (genero.length)           targeting.genders                   = genero;
@@ -504,7 +512,33 @@ function createMcpServer() {
       if (bid_amount)       b.bid_amount      = String(bid_amount);
       if (pixel_id && evento_conversao) b.promoted_object = { pixel_id, custom_event_type: evento_conversao };
       else if (pixel_id)                b.promoted_object = { pixel_id };
-      return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/adsets`, b), null, 2) }] };
+
+      // Atribuição: por padrão 1 dia clique + 1 dia visualização + 1 dia engajamento (padrão Escala Ads).
+      // Se a Meta recusar essa janela para este conjunto/objetivo, tentamos o mais próximo possível e
+      // AVISAMOS — nunca falha a criação por causa disto, nem esconde que ficou diferente do padrão.
+      const atribuicaoPedida = (Array.isArray(atribuicao) && atribuicao.length) ? atribuicao : ATRIBUICAO_PADRAO;
+      const semEngajamento   = atribuicaoPedida.filter(x => !/ENGAG/i.test(x.event_type || ""));
+      const tentativas = [{ spec: atribuicaoPedida, nota: null }];
+      if (semEngajamento.length && semEngajamento.length !== atribuicaoPedida.length) {
+        tentativas.push({ spec: semEngajamento, nota: "A Meta não aceitou a janela de engajamento via API para este conjunto — foi aplicado só clique + visualização (1 dia). Confirmar no Gerenciador." });
+      }
+      tentativas.push({ spec: null, nota: "A Meta não aceitou definir a atribuição via API para este conjunto/objetivo — ficou com a atribuição padrão da Meta. Confirmar no Gerenciador." });
+
+      let resultado, aviso;
+      for (const t of tentativas) {
+        const corpo = { ...b };                      // cópia: metaPost acrescenta o access_token ao corpo
+        if (t.spec) corpo.attribution_spec = t.spec;
+        resultado = await metaPost(`${conta_id}/adsets`, corpo);
+        if (!resultado.error) { aviso = t.nota; break; }
+        // Só insistimos com o plano B se o erro tem a ver com a atribuição; qualquer outro erro é devolvido tal como está.
+        if (!/attribution|atribui/i.test(JSON.stringify(resultado.error))) break;
+      }
+      if (resultado && resultado.id) {
+        // Lemos de volta o que a Meta realmente guardou, para o gestor poder confirmar.
+        const lido = await metaGet(`${resultado.id}`, { fields: "attribution_spec" });
+        resultado = { id: resultado.id, atribuicao_aplicada: lido.attribution_spec ?? null, ...(aviso ? { aviso_atribuicao: aviso } : {}) };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(resultado, null, 2) }] };
     }
     if (name === "criar_criativo") {
       const { conta_id, nome, pagina_id, instagram_id, titulo, corpo, descricao, url_destino, cta, imagem_hash, video_id, formato = "SINGLE_IMAGE", carousel_cards = [], url_parametros } = args;
@@ -570,6 +604,55 @@ function createMcpServer() {
       } catch (e) {
         return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
       }
+    }
+    if (name === "verificar_permissoes_contas") {
+      const { conta_id } = args;
+      // Quem somos nós? (o utilizador de sistema a que o token pertence)
+      const eu = await metaGet("me", { fields: "id,name" });
+      if (eu.error) return { content: [{ type: "text", text: JSON.stringify({ error: "Não consegui identificar o utilizador de sistema do token.", detalhes: eu.error }, null, 2) }] };
+
+      let contas;
+      if (conta_id) {
+        contas = [{ id: conta_id, name: conta_id }];
+      } else {
+        const [o, c] = await Promise.all([
+          metaGetAll(`${META_BUSINESS_ID}/owned_ad_accounts`,  { fields: "id,name,account_status" }),
+          metaGetAll(`${META_BUSINESS_ID}/client_ad_accounts`, { fields: "id,name,account_status" }),
+        ]);
+        contas = Object.values([...(o.data || []), ...(c.data || [])].reduce((a, x) => { a[x.id] = x; return a; }, {}));
+        if (!contas.length) return { content: [{ type: "text", text: JSON.stringify({ error: "A Meta devolveu erro ao listar as contas.", detalhes: [o.error?.message, c.error?.message].filter(Boolean) }, null, 2) }] };
+      }
+
+      const verificar = async (conta) => {
+        const r = await metaGet(`${conta.id}/assigned_users`, { business: META_BUSINESS_ID, fields: "id,name,tasks" });
+        if (r.error) return { conta: conta.name, id: conta.id, estado: "sem_informacao", erro: r.error.message || JSON.stringify(r.error) };
+        const minha  = (r.data || []).find(u => String(u.id) === String(eu.id));
+        const tarefas = minha?.tasks || [];
+        if (!minha) return { conta: conta.name, id: conta.id, estado: "sem_acesso", tarefas: [] };
+        const escreve = tarefas.includes("ADVERTISE") || tarefas.includes("MANAGE");
+        return { conta: conta.name, id: conta.id, estado: escreve ? "pode_criar_e_editar" : "so_leitura", tarefas };
+      };
+
+      // 5 contas de cada vez, para não rebentar os limites de chamadas da Meta.
+      const resultados = [];
+      for (let i = 0; i < contas.length; i += 5) {
+        resultados.push(...await Promise.all(contas.slice(i, i + 5).map(verificar)));
+      }
+      const por = (e) => resultados.filter(r => r.estado === e);
+      const resposta = {
+        utilizador_de_sistema: eu,
+        resumo: {
+          total: resultados.length,
+          pode_criar_e_editar: por("pode_criar_e_editar").length,
+          so_leitura: por("so_leitura").length,
+          sem_acesso: por("sem_acesso").length,
+          sem_informacao: por("sem_informacao").length,
+        },
+        PRECISAM_DE_ATENCAO: resultados.filter(r => r.estado !== "pode_criar_e_editar"),
+        contas_ok: por("pode_criar_e_editar").map(r => `${r.conta} (${r.id})`),
+        como_corrigir: "Business Settings → Utilizadores → Utilizadores do sistema → (o utilizador acima) → Atribuir ativos → Contas de anúncios → escolher a conta → ativar 'Gerir campanhas'.",
+      };
+      return { content: [{ type: "text", text: JSON.stringify(resposta, null, 2) }] };
     }
     if (name === "verificar_app_token") {
       const info = await metaGet("debug_token", { input_token: META_ACCESS_TOKEN });
