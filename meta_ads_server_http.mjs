@@ -366,7 +366,7 @@ function createMcpServer() {
       { name: "criar_publico_semelhante", description: "Cria um público Lookalike", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, publico_origem_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, tamanho: { type: "number", default: 1 }, nome: { type: "string" } }, required: ["conta_id", "publico_origem_id", "paises", "nome"] } },
       // GESTÃO
       { name: "atualizar_campanha", description: "Atualiza uma campanha. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, limite_gasto: { type: "number" }, data_fim: { type: "string" } }, required: ["campanha_id"] } },
-      { name: "atualizar_conjunto_anuncios", description: "Atualiza um conjunto de anúncios. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { conjunto_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_fim: { type: "string" }, bid_amount: { type: "number" } }, required: ["conjunto_id"] } },
+      { name: "atualizar_conjunto_anuncios", description: "Atualiza um conjunto de anúncios. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { conjunto_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_fim: { type: "string" }, bid_amount: { type: "number" }, atribuicao: { type: "array", items: { type: "object" }, description: "Janela de atribuição — lista de { event_type, window_days }. Padrão Escala Ads: [{CLICK_THROUGH,1},{VIEW_THROUGH,1},{ENGAGED_VIDEO_VIEW,1}]. ATENÇÃO: mudar a atribuição de um conjunto que já está a veicular pode reiniciar a fase de aprendizagem." } }, required: ["conjunto_id"] } },
       { name: "atualizar_anuncio", description: "Atualiza um anúncio. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { anuncio_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" } }, required: ["anuncio_id"] } },
       { name: "aprovar_e_ativar", description: "Aprova e ativa (PAUSED → ACTIVE) uma campanha, conjunto de anúncios ou anúncio. Requer o código de aprovação interno da agência.", inputSchema: { type: "object", properties: { nivel: { type: "string", description: "campanha | conjunto | anuncio" }, id: { type: "string" }, codigo_aprovacao: { type: "string" } }, required: ["nivel", "id", "codigo_aprovacao"] } },
       { name: "duplicar_campanha", description: "Duplica uma campanha. Para duplicar já em ACTIVE é necessário fornecer codigo_aprovacao.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, conta_destino: { type: "string" }, novo_nome: { type: "string" }, status_inicial: { type: "string", default: "PAUSED" }, codigo_aprovacao: { type: "string" } }, required: ["campanha_id"] } },
@@ -626,9 +626,12 @@ function createMcpServer() {
       const verificar = async (conta) => {
         const r = await metaGet(`${conta.id}/assigned_users`, { business: META_BUSINESS_ID, fields: "id,name,tasks" });
         if (r.error) return { conta: conta.name, id: conta.id, estado: "sem_informacao", erro: r.error.message || JSON.stringify(r.error) };
-        const minha  = (r.data || []).find(u => String(u.id) === String(eu.id));
+        // A Meta pode mostrar o mesmo utilizador de sistema com identificações diferentes consoante
+        // o contexto (token vs. Business Manager), por isso comparamos pelo ID E pelo nome.
+        const lista  = r.data || [];
+        const minha  = lista.find(u => String(u.id) === String(eu.id)) || (eu.name ? lista.find(u => u.name === eu.name) : undefined);
         const tarefas = minha?.tasks || [];
-        if (!minha) return { conta: conta.name, id: conta.id, estado: "sem_acesso", tarefas: [] };
+        if (!minha) return { conta: conta.name, id: conta.id, estado: "sem_acesso", tarefas: [], utilizadores_atribuidos: lista.map(u => ({ nome: u.name, id: u.id, tarefas: u.tasks })) };
         const escreve = tarefas.includes("ADVERTISE") || tarefas.includes("MANAGE");
         return { conta: conta.name, id: conta.id, estado: escreve ? "pode_criar_e_editar" : "so_leitura", tarefas };
       };
@@ -752,7 +755,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${campanha_id}`, b), null, 2) }] };
     }
     if (name === "atualizar_conjunto_anuncios") {
-      const { conjunto_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, data_fim, bid_amount } = args;
+      const { conjunto_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, data_fim, bid_amount, atribuicao } = args;
       const erro = bloqueiaAtivacaoSemCodigo(status, codigo_aprovacao);
       if (erro) return { content: [{ type: "text", text: JSON.stringify({ error: erro }, null, 2) }] };
       const b = {};
@@ -762,6 +765,7 @@ function createMcpServer() {
       if (orcamento_total)  b.lifetime_budget  = String(orcamento_total);
       if (data_fim)         b.end_time         = data_fim;
       if (bid_amount)       b.bid_amount       = String(bid_amount);
+      if (Array.isArray(atribuicao) && atribuicao.length) b.attribution_spec = atribuicao;
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conjunto_id}`, b), null, 2) }] };
     }
     if (name === "atualizar_anuncio") {
