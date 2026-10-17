@@ -40,6 +40,120 @@ if (!APPROVAL_CODE)     process.stderr.write("[meta-ads-escala] AVISO: APPROVAL_
 if (!GOOGLE_OAUTH_REFRESH_TOKEN && (!GOOGLE_SA_EMAIL || !GOOGLE_SA_PRIVATE_KEY)) process.stderr.write("[meta-ads-escala] AVISO: nenhuma credencial do Google Drive configurada (nem service account, nem OAuth pessoal) — upload direto do Drive ficará indisponível.\n");
 
 // ─── Helpers Meta API ─────────────────────────────────────────────────────────
+// ─── Estratégia de lance dos conjuntos de anúncios ────────────────────────────
+// Em campanhas CBO (orçamento na campanha) a estratégia de lance define-se NA CAMPANHA; em campanhas
+// ABO (orçamento por conjunto) define-se NO CONJUNTO — e se não for enviada, a Meta aplica um padrão
+// que exige valor de lance ("valor de lance obrigatório"). Esta função decide o que enviar.
+const ESTRATEGIAS_COM_LANCE = ["COST_CAP", "LOWEST_COST_WITH_BID_CAP"];
+
+function decidirLance({ campanha, bid_strategy, bid_amount }) {
+  const lido = campanha && !campanha.error;
+  if (!lido) {
+    // Não conseguimos ler a campanha: não adivinhamos — respeitamos só o que foi pedido.
+    return { bid_strategy: bid_strategy || undefined, origem: "pedido" };
+  }
+  const temOrcamentoNaCampanha = Boolean(campanha.daily_budget || campanha.lifetime_budget);
+  if (temOrcamentoNaCampanha) {                                   // CBO
+    if (ESTRATEGIAS_COM_LANCE.includes(campanha.bid_strategy) && !bid_amount) {
+      return { erro: `Esta campanha é CBO com a estratégia ${campanha.bid_strategy}, que exige um valor de lance/limite de custo em cada conjunto. Indica 'bid_amount' (em cêntimos, ex: 850 = 8,50) ou muda a estratégia da campanha para LOWEST_COST_WITHOUT_CAP (sem limite).` };
+    }
+    return {
+      bid_strategy: undefined,
+      origem: `definida na campanha CBO (${campanha.bid_strategy || "padrão"})`,
+      aviso: bid_strategy ? `Campanha CBO: a estratégia de lance (${bid_strategy}) define-se na campanha e foi ignorada neste conjunto.` : undefined,
+    };
+  }
+  const estrategia = bid_strategy || (bid_amount ? "COST_CAP" : "LOWEST_COST_WITHOUT_CAP");   // ABO
+  if (ESTRATEGIAS_COM_LANCE.includes(estrategia) && !bid_amount) {
+    return { erro: `A estratégia ${estrategia} exige 'bid_amount' (em cêntimos, ex: 850 = 8,50). Para volume máximo, sem limite, usa LOWEST_COST_WITHOUT_CAP.` };
+  }
+  return { bid_strategy: estrategia, origem: bid_strategy ? "pedido" : "padrão (campanha ABO)" };
+}
+
+// ─── Métricas ao nível de campanha / conjunto / anúncio ───────────────────────
+// A Meta devolve as ações como listas de { action_type, value } e tudo como texto. Aqui passamos
+// para números e objetos simples, e calculamos as taxas entre etapas do funil.
+const numOuNull = (v) => (v === undefined || v === null || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
+const arredonda = (v, casas = 4) => (v === null ? null : Math.round(v * 10 ** casas) / 10 ** casas);
+const dividir   = (a, b) => (a !== null && b ? arredonda(a / b) : null);
+
+function listaParaObjeto(lista) {
+  const o = {};
+  for (const x of lista || []) if (x && x.action_type) o[x.action_type] = Number(x.value);
+  return o;
+}
+const primeiroDe = (obj, tipos) => { for (const t of tipos) if (obj[t] !== undefined) return obj[t]; return null; };
+const primeiroValor = (lista) => (Array.isArray(lista) && lista.length ? numOuNull(lista[0].value) : null);
+
+const CAMPOS_BREAKDOWN = ["age", "gender", "country", "region", "publisher_platform", "platform_position", "device_platform", "impression_device"];
+
+function normalizarLinhaInsights(l) {
+  const acoes   = listaParaObjeto(l.actions);
+  const custos  = listaParaObjeto(l.cost_per_action_type);
+  const valores = listaParaObjeto(l.action_values);
+
+  const gasto       = numOuNull(l.spend);
+  const cliquesLink = numOuNull(l.inline_link_clicks);
+  const paginaVista = primeiroDe(acoes,  ["landing_page_view"]);
+  const leads       = primeiroDe(acoes,  ["lead", "offsite_conversion.fb_pixel_lead", "onsite_conversion.lead_grouped"]);
+  const compras     = primeiroDe(acoes,  ["purchase", "offsite_conversion.fb_pixel_purchase", "omni_purchase"]);
+  const receita     = primeiroDe(valores, ["purchase", "offsite_conversion.fb_pixel_purchase", "omni_purchase"]);
+
+  const linha = {};
+  for (const k of ["date_start", "date_stop", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name", ...CAMPOS_BREAKDOWN]) {
+    if (l[k] !== undefined) linha[k] = l[k];
+  }
+  Object.assign(linha, {
+    gasto,
+    impressoes: numOuNull(l.impressions),
+    alcance: numOuNull(l.reach),
+    frequencia: arredonda(numOuNull(l.frequency), 2),
+    cpm: arredonda(numOuNull(l.cpm), 2),
+    cliques_no_link: cliquesLink,
+    ctr_link_pct: arredonda(numOuNull(l.inline_link_click_ctr), 2),
+    cpc_link: arredonda(numOuNull(l.cost_per_inline_link_click), 2),
+    cliques_todos: numOuNull(l.clicks),
+    ctr_todos_pct: arredonda(numOuNull(l.ctr), 2),
+    // Funil: impressão → clique no link → visualização da página → lead/compra
+    visualizacoes_da_pagina: paginaVista,
+    leads,
+    compras,
+    receita_compras: receita,
+    roas: primeiroValor(l.purchase_roas),
+    custo_por_clique_no_link: dividir(gasto, cliquesLink),
+    custo_por_visualizacao_da_pagina: dividir(gasto, paginaVista),
+    custo_por_lead: dividir(gasto, leads),
+    taxa_clique_para_pagina: dividir(paginaVista, cliquesLink),
+    taxa_pagina_para_lead: dividir(leads, paginaVista),
+    taxa_clique_para_lead: dividir(leads, cliquesLink),
+    video: {
+      reproducoes: primeiroValor(l.video_play_actions),
+      thruplay: primeiroValor(l.video_thruplay_watched_actions),
+      p25: primeiroValor(l.video_p25_watched_actions),
+      p50: primeiroValor(l.video_p50_watched_actions),
+      p75: primeiroValor(l.video_p75_watched_actions),
+      p100: primeiroValor(l.video_p100_watched_actions),
+    },
+    todas_as_acoes: acoes,
+    custo_por_acao: custos,
+  });
+  return linha;
+}
+
+// Lê a resposta da Meta sem rebentar quando vem vazia ou não é JSON (ex: erro 5xx do gateway).
+// Antes, isso aparecia como "Unexpected end of JSON input" — sem dizer o que se passou.
+async function lerRespostaMeta(res) {
+  const texto = await res.text();
+  if (!texto) {
+    return { error: { message: `A Meta devolveu uma resposta vazia (HTTP ${res.status}).`, http_status: res.status } };
+  }
+  try {
+    return JSON.parse(texto);
+  } catch {
+    return { error: { message: `A Meta devolveu uma resposta que não é JSON (HTTP ${res.status}): ${texto.slice(0, 200)}`, http_status: res.status } };
+  }
+}
+
 // Erros que a Meta costuma devolver de forma intermitente — vale a pena repetir o pedido.
 // (1 = "reduce the amount of data", 2 = serviço temporariamente indisponível, 4/17/32/613 = limites
 //  de chamadas, 341/368 = bloqueios temporários; #200 "Provide valid app ID" também aparece de
@@ -48,6 +162,7 @@ function erroTransitorio(err) {
   if (!err || typeof err !== "object") return false;
   if ([1, 2, 4, 17, 32, 341, 368, 613].includes(err.code)) return true;
   if (err.code === 200 && /valid app id/i.test(err.message || "")) return true;
+  if (err.http_status && err.http_status >= 500) return true;
   return false;
 }
 const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -59,7 +174,7 @@ async function metaGet(endpoint, params = {}, tentativas = 3) {
   for (let i = 0; i < tentativas; i++) {
     try {
       const res  = await fetch(url);
-      const data = await res.json();
+      const data = await lerRespostaMeta(res);
       if (data.error) {
         process.stderr.write(`[meta-ads-escala] Erro GET (tentativa ${i + 1}/${tentativas}): ${JSON.stringify(data.error)}\n`);
         // O erro code 1 só se resolve com páginas menores — quem chama (metaGetAll) trata disso.
@@ -83,12 +198,12 @@ async function metaPost(endpoint, body = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
+    const data = await lerRespostaMeta(res);
     if (data.error) process.stderr.write(`[meta-ads-escala] Erro POST: ${JSON.stringify(data.error)}\n`);
     return data;
   } catch (e) {
     process.stderr.write(`[meta-ads-escala] Erro fetch POST: ${e.message}\n`);
-    return { error: e.message };
+    return { error: { message: e.message } };
   }
 }
 
@@ -96,12 +211,12 @@ async function metaDelete(endpoint) {
   const url = `${BASE_URL}/${endpoint}?access_token=${encodeURIComponent(META_ACCESS_TOKEN)}`;
   try {
     const res  = await fetch(url, { method: "DELETE" });
-    const data = await res.json();
+    const data = await lerRespostaMeta(res);
     if (data.error) process.stderr.write(`[meta-ads-escala] Erro DELETE: ${JSON.stringify(data.error)}\n`);
     return data;
   } catch (e) {
     process.stderr.write(`[meta-ads-escala] Erro fetch DELETE: ${e.message}\n`);
-    return { error: e.message };
+    return { error: { message: e.message } };
   }
 }
 
@@ -117,16 +232,113 @@ async function metaPostMultipart(endpoint, fields = {}, ficheiro) {
   form.append("source", new Blob([ficheiro.buffer], { type: ficheiro.mimeType || "application/octet-stream" }), ficheiro.nome || "upload");
   try {
     const res  = await fetch(url, { method: "POST", body: form });
-    const data = await res.json();
+    const data = await lerRespostaMeta(res);
     if (data.error) process.stderr.write(`[meta-ads-escala] Erro POST multipart: ${JSON.stringify(data.error)}\n`);
     return data;
   } catch (e) {
     process.stderr.write(`[meta-ads-escala] Erro fetch POST multipart: ${e.message}\n`);
-    return { error: e.message };
+    return { error: { message: e.message } };
   }
 }
 
-async function metaGetAll(endpoint, params = {}) {
+// Envia um pedido multipart com UM campo de ficheiro (usado no upload de vídeo em partes).
+async function metaPostMultipartCampo(endpoint, fields = {}, campoFicheiro, blob, nomeFicheiro) {
+  const form = new FormData();
+  form.append("access_token", META_ACCESS_TOKEN);
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined && v !== null) form.append(k, String(v));
+  }
+  if (campoFicheiro && blob) form.append(campoFicheiro, blob, nomeFicheiro || "chunk");
+  try {
+    const res  = await fetch(`${BASE_URL}/${endpoint}`, { method: "POST", body: form });
+    const data = await lerRespostaMeta(res);
+    if (data.error) process.stderr.write(`[meta-ads-escala] Erro POST multipart (${fields.upload_phase || "campo"}): ${JSON.stringify(data.error)}\n`);
+    return data;
+  } catch (e) {
+    process.stderr.write(`[meta-ads-escala] Erro fetch POST multipart campo: ${e.message}\n`);
+    return { error: { message: e.message } };
+  }
+}
+
+// Upload RESUMÍVEL (em partes) de vídeo para a biblioteca da conta — é o método que a Meta recomenda
+// para ficheiros grandes: o ficheiro vai em blocos pequenos em vez de um único pedido enorme que a
+// Meta pode cortar (resposta vazia). Fases: start → transfer (vários blocos) → finish.
+async function metaUploadVideoResumable(conta_id, ficheiro, campos = {}) {
+  const endpoint = `${conta_id}/advideos`;
+  const tamanho  = ficheiro.buffer.length;
+
+  const inicio = await metaPostMultipartCampo(endpoint, { upload_phase: "start", file_size: tamanho });
+  if (inicio.error) return { error: { ...inicio.error, etapa: "start" } };
+  const { upload_session_id, video_id } = inicio;
+  if (!upload_session_id) return { error: { message: "A Meta não devolveu o identificador da sessão de upload.", etapa: "start", resposta: inicio } };
+
+  let start = parseInt(inicio.start_offset, 10);
+  let end   = parseInt(inicio.end_offset, 10);
+  let blocos = 0;
+  while (start < end) {
+    const bloco = ficheiro.buffer.subarray(start, end);
+    const r = await metaPostMultipartCampo(
+      endpoint,
+      { upload_phase: "transfer", upload_session_id, start_offset: start },
+      "video_file_chunk",
+      new Blob([bloco], { type: "application/octet-stream" }),
+      "chunk",
+    );
+    if (r.error) return { error: { ...r.error, etapa: "transfer", enviado_bytes: start, total_bytes: tamanho } };
+    start = parseInt(r.start_offset, 10);
+    end   = parseInt(r.end_offset, 10);
+    if (Number.isNaN(start) || Number.isNaN(end)) return { error: { message: "Resposta inesperada da Meta durante o envio do vídeo.", etapa: "transfer", resposta: r } };
+    if (++blocos > 100000) return { error: { message: "Envio de vídeo interrompido: demasiados blocos.", etapa: "transfer" } };
+  }
+
+  const fim = await metaPostMultipartCampo(endpoint, { upload_phase: "finish", upload_session_id, ...campos });
+  if (fim.error) return { error: { ...fim.error, etapa: "finish" } };
+  return { id: video_id, success: fim.success !== false, blocos_enviados: blocos };
+}
+
+// Olha para os primeiros bytes para dizer que tipo de ficheiro é realmente — apanha o caso de o
+// "vídeo" descarregado ser afinal uma página web de erro, e ajuda a perceber erros de formato.
+function analisarFicheiroVideo(buffer) {
+  const cab = buffer.subarray(0, 16);
+  const texto = cab.toString("latin1");
+  if (/^\s*<(!doctype|html|\?xml)/i.test(texto) || /^\s*[{\[]/.test(texto)) {
+    return { e_video: false, motivo: "O ficheiro descarregado não é um vídeo — parece uma página web ou uma resposta de erro (verifica as permissões do link de origem)." };
+  }
+  if (buffer.length > 12 && buffer.subarray(4, 8).toString("latin1") === "ftyp") {
+    const marca = buffer.subarray(8, 12).toString("latin1").trim();
+    return { e_video: true, contentor: marca === "qt" ? "QuickTime (.MOV)" : `MP4 (${marca})`, marca };
+  }
+  if (cab[0] === 0x1a && cab[1] === 0x45 && cab[2] === 0xdf && cab[3] === 0xa3) {
+    return { e_video: true, contentor: "Matroska/WebM", aviso: "Matroska/WebM normalmente não é aceite pela Meta — converte para MP4." };
+  }
+  return { e_video: true, contentor: "desconhecido" };
+}
+
+// Orquestra o upload: ficheiros grandes vão em partes; se falhar por problema de transporte
+// (resposta vazia, 5xx, rede), tenta o outro método. Se a Meta rejeitou o FICHEIRO (ex: formato),
+// não insiste — devolve o erro com uma dica clara.
+async function subirVideoParaMeta(conta_id, ficheiro, nome) {
+  const campos = nome ? { name: nome, title: nome } : {};
+  const grande = ficheiro.buffer.length > 25 * 1024 * 1024;
+  const ordem  = grande ? ["resumivel", "simples"] : ["simples", "resumivel"];
+  let ultimo;
+  for (const modo of ordem) {
+    const r = modo === "resumivel"
+      ? await metaUploadVideoResumable(conta_id, ficheiro, campos)
+      : await metaPostMultipart(`${conta_id}/advideos`, campos, ficheiro);
+    if (!r.error) return { ...r, modo_upload: modo };
+    ultimo = { ...r, modo_upload: modo };
+    const e = r.error || {};
+    const problemaDeTransporte = !e.code && (e.http_status >= 500 || /vazia|n[ãa]o [ée] JSON|fetch|network|terminated|socket|timeout/i.test(e.message || ""));
+    if (!problemaDeTransporte) break;
+  }
+  if (ultimo?.error?.code === 352) {
+    ultimo.error.dica = "A Meta não aceitou o formato deste vídeo. Exporta/converte para MP4 (vídeo H.264, áudio AAC) e tenta de novo — ficheiros .MOV do iPhone (HEVC) e exportações pouco comuns costumam ser o motivo.";
+  }
+  return ultimo;
+}
+
+async function metaGetAll(endpoint, params = {}, maxResultados = Infinity) {
   const results = [];
   // Páginas de 200 itens com campos pesados (ex: balance, insights) fazem a Meta recusar com
   // "Please reduce the amount of data". Começamos em 50 e, se a Meta pedir, vamos reduzindo.
@@ -140,7 +352,7 @@ async function metaGetAll(endpoint, params = {}) {
   if (data.error) return data;
   results.push(...(data.data || []));
   let aviso;
-  while (data.paging?.next) {
+  while (data.paging?.next && results.length < maxResultados) {
     const next       = new URL(data.paging.next);
     const nextParams = Object.fromEntries(next.searchParams.entries());
     data = await metaGet(endpoint, nextParams);
@@ -150,6 +362,9 @@ async function metaGetAll(endpoint, params = {}) {
       break;
     }
     results.push(...(data.data || []));
+  }
+  if (!aviso && data.paging?.next && results.length >= maxResultados) {
+    aviso = `Resultado limitado às primeiras ${results.length} linhas — há mais dados. Restringe o período ou o nível para ver o resto.`;
   }
   return aviso ? { data: results, aviso } : { data: results };
 }
@@ -346,10 +561,11 @@ function createMcpServer() {
       { name: "metricas_campanha", description: "Métricas de uma campanha", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, periodo: { type: "string", default: "last_30d" } }, required: ["campanha_id"] } },
       { name: "resumo_conta", description: "Resumo de performance de uma conta", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, periodo: { type: "string", default: "last_30d" } }, required: ["conta_id"] } },
       { name: "resumo_todos_clientes", description: "Resumo de TODAS as contas ativas", inputSchema: { type: "object", properties: { periodo: { type: "string", default: "last_30d" } }, required: [] } },
+      { name: "metricas_detalhadas", description: "Métricas (insights) ao nível de CAMPANHA, CONJUNTO DE ANÚNCIOS ou ANÚNCIO/CRIATIVO — para análise de funil, comparação de criativos e de públicos. 'id' pode ser uma conta (act_...), uma campanha ou um conjunto de anúncios; 'nivel' define o detalhe das linhas devolvidas (campaign | adset | ad). Devolve gasto, impressões, alcance, frequência, CPM, cliques no link, CTR, CPC, visualizações da página de destino, leads, compras, ROAS, métricas de vídeo, o custo de cada etapa e as taxas de conversão entre etapas (clique→página→lead). Suporta intervalo de datas, uma linha por dia e breakdowns (idade, género, posicionamento...).", inputSchema: { type: "object", properties: { id: { type: "string", description: "act_... (conta), ID de campanha ou ID de conjunto de anúncios" }, nivel: { type: "string", enum: ["campaign", "adset", "ad"], default: "ad", description: "Detalhe das linhas: campaign = por campanha, adset = por conjunto, ad = por anúncio/criativo" }, periodo: { type: "string", default: "last_30d", description: "today | yesterday | last_7d | last_14d | last_30d | last_90d | this_month | last_month | maximum" }, data_inicio: { type: "string", description: "AAAA-MM-DD — usar com data_fim; substitui o 'periodo'" }, data_fim: { type: "string", description: "AAAA-MM-DD" }, por_dia: { type: "boolean", default: false, description: "true = uma linha por dia (evolução ao longo do tempo)" }, breakdown: { type: "string", description: "Opcional, separados por vírgula. Ex: age | gender | age,gender | country | publisher_platform | platform_position | publisher_platform,platform_position | device_platform | impression_device" }, max_resultados: { type: "number", default: 300, description: "Máximo de linhas devolvidas (padrão 300)" } }, required: ["id"] } },
       { name: "metricas_conta_por_campanha", description: "Métricas por campanha dentro de uma conta", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, periodo: { type: "string", default: "last_30d" } }, required: ["conta_id"] } },
       // CRIAÇÃO
       { name: "criar_campanha", description: "Cria uma nova campanha. É SEMPRE criada em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativa.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, objetivo: { type: "string", description: "OUTCOME_AWARENESS | OUTCOME_TRAFFIC | OUTCOME_ENGAGEMENT | OUTCOME_LEADS | OUTCOME_APP_PROMOTION | OUTCOME_SALES" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, limite_gasto: { type: "number" }, bid_strategy: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } } }, required: ["conta_id", "nome", "objetivo"] } },
-      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo. A atribuição fica por padrão em 1 dia clique + 1 dia visualização + 1 dia engajamento (padrão Escala Ads) e a resposta mostra a atribuição que a Meta realmente guardou.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" }, description: "Interesses para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_interesses" }, comportamentos: { type: "array", items: { type: "object" }, description: "Comportamentos para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_comportamentos" }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: false, description: "true = deixa a Meta escolher os posicionamentos automaticamente (Advantage+ Placements) | false (padrão) = usa só os posicionamentos manuais definidos, sem otimização automática" }, publico_advantage: { type: "boolean", default: false, description: "true = deixa a Meta expandir o público automaticamente (Advantage+ Audience) | false (padrão) = usa só o targeting definido, sem expansão" }, bid_amount: { type: "number" }, atribuicao: { type: "array", items: { type: "object" }, description: "Janela de atribuição do conjunto — lista de { event_type, window_days }. PADRÃO Escala Ads (já aplicado se não for dado): 1 dia clique + 1 dia visualização + 1 dia engajamento. Só preencher para casos excecionais pedidos expressamente." }, targeting_extra: { type: "object", description: "Campos adicionais de targeting da Meta, para replicar fielmente um conjunto existente. Ex: { \"age_range\": [23, 55] } (sugestão de idade do Advantage+ Audience), { \"brand_safety_content_filter_levels\": [\"FACEBOOK_RELAXED\", \"AN_RELAXED\"] } (filtro de inventário), { \"geo_locations\": { \"location_types\": [\"home\", \"recent\", \"frequently_in\"] } } (tipos de localização — é combinado com os países, não os substitui)." } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
+      { name: "criar_conjunto_anuncios", description: "Cria um conjunto de anúncios. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo. A atribuição fica por padrão em 1 dia clique + 1 dia visualização + 1 dia engajamento (padrão Escala Ads) e a resposta mostra a atribuição que a Meta realmente guardou.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, campanha_id: { type: "string" }, nome: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_inicio: { type: "string" }, data_fim: { type: "string" }, objetivo_otimizacao: { type: "string" }, evento_cobranca: { type: "string" }, pixel_id: { type: "string" }, evento_conversao: { type: "string" }, paises: { type: "array", items: { type: "string" } }, idade_min: { type: "number", default: 18 }, idade_max: { type: "number", default: 65 }, genero: { type: "array", items: { type: "number" } }, interesses: { type: "array", items: { type: "object" }, description: "Interesses para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_interesses" }, comportamentos: { type: "array", items: { type: "object" }, description: "Comportamentos para targeting detalhado — cada item {id, name}, obtidos com a ferramenta pesquisar_comportamentos" }, publicos_incluir: { type: "array", items: { type: "string" } }, publicos_excluir: { type: "array", items: { type: "string" } }, placements_automaticos: { type: "boolean", default: false, description: "true = deixa a Meta escolher os posicionamentos automaticamente (Advantage+ Placements) | false (padrão) = usa só os posicionamentos manuais definidos, sem otimização automática" }, publico_advantage: { type: "boolean", default: false, description: "true = deixa a Meta expandir o público automaticamente (Advantage+ Audience) | false (padrão) = usa só o targeting definido, sem expansão" }, bid_amount: { type: "number", description: "Limite de custo por resultado / valor de lance, em CÊNTIMOS (ex: 850 = 8,50). Só para campanhas com limite de custo; deixa vazio para volume máximo sem limite." }, bid_strategy: { type: "string", description: "Estratégia de lance. Só se aplica a campanhas ABO (em CBO define-se na campanha e este campo é ignorado). Padrão em ABO: LOWEST_COST_WITHOUT_CAP (volume máximo, sem limite) — ou COST_CAP se houver bid_amount. Outras: LOWEST_COST_WITH_BID_CAP." }, atribuicao: { type: "array", items: { type: "object" }, description: "Janela de atribuição do conjunto — lista de { event_type, window_days }. PADRÃO Escala Ads (já aplicado se não for dado): 1 dia clique + 1 dia visualização + 1 dia engajamento. Só preencher para casos excecionais pedidos expressamente." }, targeting_extra: { type: "object", description: "Campos adicionais de targeting da Meta, para replicar fielmente um conjunto existente. Ex: { \"age_range\": [23, 55] } (sugestão de idade do Advantage+ Audience), { \"brand_safety_content_filter_levels\": [\"FACEBOOK_RELAXED\", \"AN_RELAXED\"] } (filtro de inventário), { \"geo_locations\": { \"location_types\": [\"home\", \"recent\", \"frequently_in\"] } } (tipos de localização — é combinado com os países, não os substitui)." } }, required: ["conta_id", "campanha_id", "nome", "objetivo_otimizacao", "evento_cobranca"] } },
       { name: "criar_criativo", description: "Cria um criativo de anúncio. Por padrão, todas as otimizações de IA do Advantage+ Creative (correção de imagem, melhorias de texto, comentários automáticos, filtros/uncrop de vídeo, etc.) ficam desativadas.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, nome: { type: "string" }, pagina_id: { type: "string" }, instagram_id: { type: "string" }, titulo: { type: "string" }, corpo: { type: "string" }, descricao: { type: "string" }, url_destino: { type: "string" }, cta: { type: "string", description: "LEARN_MORE | SHOP_NOW | SIGN_UP | DOWNLOAD | GET_QUOTE | CONTACT_US | SEND_MESSAGE | WHATSAPP_MESSAGE" }, imagem_hash: { type: "string" }, video_id: { type: "string" }, formato: { type: "string", default: "SINGLE_IMAGE" }, carousel_cards: { type: "array", items: { type: "object" } }, url_parametros: { type: "string" } }, required: ["conta_id", "nome", "pagina_id", "corpo", "url_destino", "cta"] } },
       { name: "criar_anuncio", description: "Cria um anúncio associando criativo a um conjunto. É SEMPRE criado em PAUSED, independentemente do que for pedido — precisa de aprovação via 'aprovar_e_ativar' para ficar ativo.", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, conjunto_id: { type: "string" }, nome: { type: "string" }, criativo_id: { type: "string" } }, required: ["conta_id", "conjunto_id", "nome", "criativo_id"] } },
       { name: "fazer_upload_imagem", description: "Upload de imagem via URL", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, url_imagem: { type: "string" } }, required: ["conta_id", "url_imagem"] } },
@@ -366,7 +582,7 @@ function createMcpServer() {
       { name: "criar_publico_semelhante", description: "Cria um público Lookalike", inputSchema: { type: "object", properties: { conta_id: { type: "string" }, publico_origem_id: { type: "string" }, paises: { type: "array", items: { type: "string" } }, tamanho: { type: "number", default: 1 }, nome: { type: "string" } }, required: ["conta_id", "publico_origem_id", "paises", "nome"] } },
       // GESTÃO
       { name: "atualizar_campanha", description: "Atualiza uma campanha. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, limite_gasto: { type: "number" }, data_fim: { type: "string" } }, required: ["campanha_id"] } },
-      { name: "atualizar_conjunto_anuncios", description: "Atualiza um conjunto de anúncios. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { conjunto_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_fim: { type: "string" }, bid_amount: { type: "number" }, atribuicao: { type: "array", items: { type: "object" }, description: "Janela de atribuição — lista de { event_type, window_days }. Padrão Escala Ads: [{CLICK_THROUGH,1},{VIEW_THROUGH,1},{ENGAGED_VIDEO_VIEW,1}]. ATENÇÃO: mudar a atribuição de um conjunto que já está a veicular pode reiniciar a fase de aprendizagem." } }, required: ["conjunto_id"] } },
+      { name: "atualizar_conjunto_anuncios", description: "Atualiza um conjunto de anúncios. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { conjunto_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" }, orcamento_diario: { type: "number" }, orcamento_total: { type: "number" }, data_fim: { type: "string" }, bid_amount: { type: "number" }, bid_strategy: { type: "string", description: "Só campanhas ABO: LOWEST_COST_WITHOUT_CAP | COST_CAP | LOWEST_COST_WITH_BID_CAP" }, atribuicao: { type: "array", items: { type: "object" }, description: "Janela de atribuição — lista de { event_type, window_days }. Padrão Escala Ads: [{CLICK_THROUGH,1},{VIEW_THROUGH,1},{ENGAGED_VIDEO_VIEW,1}]. ATENÇÃO: mudar a atribuição de um conjunto que já está a veicular pode reiniciar a fase de aprendizagem." } }, required: ["conjunto_id"] } },
       { name: "atualizar_anuncio", description: "Atualiza um anúncio. Para mudar o status para ACTIVE é necessário fornecer codigo_aprovacao — caso contrário use 'aprovar_e_ativar'.", inputSchema: { type: "object", properties: { anuncio_id: { type: "string" }, nome: { type: "string" }, status: { type: "string" }, codigo_aprovacao: { type: "string" } }, required: ["anuncio_id"] } },
       { name: "aprovar_e_ativar", description: "Aprova e ativa (PAUSED → ACTIVE) uma campanha, conjunto de anúncios ou anúncio. Requer o código de aprovação interno da agência.", inputSchema: { type: "object", properties: { nivel: { type: "string", description: "campanha | conjunto | anuncio" }, id: { type: "string" }, codigo_aprovacao: { type: "string" } }, required: ["nivel", "id", "codigo_aprovacao"] } },
       { name: "duplicar_campanha", description: "Duplica uma campanha. Para duplicar já em ACTIVE é necessário fornecer codigo_aprovacao.", inputSchema: { type: "object", properties: { campanha_id: { type: "string" }, conta_destino: { type: "string" }, novo_nome: { type: "string" }, status_inicial: { type: "string", default: "PAUSED" }, codigo_aprovacao: { type: "string" } }, required: ["campanha_id"] } },
@@ -477,7 +693,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conta_id}/campaigns`, b), null, 2) }] };
     }
     if (name === "criar_conjunto_anuncios") {
-      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], comportamentos = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = false, publico_advantage = false, bid_amount, targeting_extra, atribuicao } = args;
+      const { conta_id, campanha_id, nome, orcamento_diario, orcamento_total, data_inicio, data_fim, objetivo_otimizacao, evento_cobranca, pixel_id, evento_conversao, paises = [], idade_min = 18, idade_max = 65, genero = [], interesses = [], comportamentos = [], publicos_incluir = [], publicos_excluir = [], placements_automaticos = false, publico_advantage = false, bid_amount, bid_strategy, targeting_extra, atribuicao } = args;
       const targeting = { age_min: idade_min, age_max: idade_max, geo_locations: { countries: paises } };
       targeting.targeting_automation = { advantage_audience: publico_advantage ? 1 : 0 };
       if (genero.length)           targeting.genders                   = genero;
@@ -510,6 +726,15 @@ function createMcpServer() {
       if (data_inicio)      b.start_time      = data_inicio;
       if (data_fim)         b.end_time        = data_fim;
       if (bid_amount)       b.bid_amount      = String(bid_amount);
+
+      // Estratégia de lance (ver decidirLance): em ABO enviamos sempre uma; em CBO deixamos a da campanha.
+      const campanhaInfo = await metaGet(`${campanha_id}`, { fields: "daily_budget,lifetime_budget,bid_strategy" });
+      const lance = decidirLance({ campanha: campanhaInfo, bid_strategy, bid_amount });
+      if (lance.erro) return { content: [{ type: "text", text: JSON.stringify({ error: lance.erro }, null, 2) }] };
+      if (lance.bid_strategy) {
+        b.bid_strategy = lance.bid_strategy;
+        if (lance.bid_strategy === "LOWEST_COST_WITHOUT_CAP") delete b.bid_amount;   // "sem limite" não leva valor de lance
+      }
       if (pixel_id && evento_conversao) b.promoted_object = { pixel_id, custom_event_type: evento_conversao };
       else if (pixel_id)                b.promoted_object = { pixel_id };
 
@@ -536,7 +761,7 @@ function createMcpServer() {
       if (resultado && resultado.id) {
         // Lemos de volta o que a Meta realmente guardou, para o gestor poder confirmar.
         const lido = await metaGet(`${resultado.id}`, { fields: "attribution_spec" });
-        resultado = { id: resultado.id, atribuicao_aplicada: lido.attribution_spec ?? null, ...(aviso ? { aviso_atribuicao: aviso } : {}) };
+        resultado = { id: resultado.id, estrategia_de_lance: lance.bid_strategy || lance.origem, atribuicao_aplicada: lido.attribution_spec ?? null, ...(aviso ? { aviso_atribuicao: aviso } : {}), ...(lance.aviso ? { aviso_lance: lance.aviso } : {}) };
       }
       return { content: [{ type: "text", text: JSON.stringify(resultado, null, 2) }] };
     }
@@ -657,6 +882,31 @@ function createMcpServer() {
       };
       return { content: [{ type: "text", text: JSON.stringify(resposta, null, 2) }] };
     }
+    if (name === "metricas_detalhadas") {
+      const { id, nivel = "ad", periodo = "last_30d", data_inicio, data_fim, por_dia = false, breakdown, max_resultados = 300 } = args;
+      const erroMsg = (m) => ({ content: [{ type: "text", text: JSON.stringify({ error: m }, null, 2) }] });
+      if (!["campaign", "adset", "ad"].includes(nivel)) return erroMsg("'nivel' tem de ser campaign, adset ou ad.");
+      if ((data_inicio && !data_fim) || (!data_inicio && data_fim)) return erroMsg("Para um intervalo de datas indica data_inicio E data_fim (AAAA-MM-DD).");
+      const camposDeId = {
+        campaign: "campaign_id,campaign_name",
+        adset: "campaign_id,campaign_name,adset_id,adset_name",
+        ad: "campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name",
+      }[nivel];
+      const metricas = "impressions,reach,frequency,spend,clicks,ctr,cpm,inline_link_clicks,inline_link_click_ctr,cost_per_inline_link_click,actions,cost_per_action_type,action_values,purchase_roas,video_play_actions,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions";
+      const params = { fields: `${camposDeId},${metricas}`, level: nivel };
+      if (data_inicio && data_fim) params.time_range = JSON.stringify({ since: data_inicio, until: data_fim });
+      else params.date_preset = periodo;
+      if (por_dia)   params.time_increment = "1";
+      if (breakdown) params.breakdowns = breakdown;
+      const r = await metaGetAll(`${id}/insights`, params, Number(max_resultados) || 300);
+      if (r.error) return { content: [{ type: "text", text: JSON.stringify({ error: "A Meta devolveu erro ao obter as métricas.", detalhes: r.error }, null, 2) }] };
+      const dados = (r.data || []).map(normalizarLinhaInsights);
+      const resposta = { nivel, periodo: (data_inicio && data_fim) ? `${data_inicio} a ${data_fim}` : periodo, total_linhas: dados.length };
+      if (r.aviso) resposta.aviso = r.aviso;
+      if (!dados.length) resposta.nota = "Sem dados neste período/nível (só aparecem entidades que tiveram entrega no período).";
+      resposta.dados = dados;
+      return { content: [{ type: "text", text: JSON.stringify(resposta, null, 2) }] };
+    }
     if (name === "verificar_app_token") {
       const info = await metaGet("debug_token", { input_token: META_ACCESS_TOKEN });
       return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
@@ -665,8 +915,13 @@ function createMcpServer() {
       const { conta_id, drive_file_id_ou_url, nome } = args;
       try {
         const ficheiro = await baixarFicheiroDrive(drive_file_id_ou_url);
-        const resultado = await metaPostMultipart(`${conta_id}/advideos`, nome ? { name: nome, title: nome } : {}, ficheiro);
-        return { content: [{ type: "text", text: JSON.stringify({ origem: ficheiro.nome, resultado }, null, 2) }] };
+        const analise  = analisarFicheiroVideo(ficheiro.buffer);
+        const info     = { origem: ficheiro.nome, tamanho_mb: Math.round(ficheiro.buffer.length / 1048576 * 10) / 10, formato_detetado: analise.contentor };
+        if (!analise.e_video) {
+          return { content: [{ type: "text", text: JSON.stringify({ ...info, error: analise.motivo }, null, 2) }] };
+        }
+        const resultado = await subirVideoParaMeta(conta_id, ficheiro, nome);
+        return { content: [{ type: "text", text: JSON.stringify({ ...info, ...(analise.aviso ? { aviso: analise.aviso } : {}), resultado }, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: JSON.stringify({ error: e.message }, null, 2) }] };
       }
@@ -755,7 +1010,7 @@ function createMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${campanha_id}`, b), null, 2) }] };
     }
     if (name === "atualizar_conjunto_anuncios") {
-      const { conjunto_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, data_fim, bid_amount, atribuicao } = args;
+      const { conjunto_id, nome, status, codigo_aprovacao, orcamento_diario, orcamento_total, data_fim, bid_amount, bid_strategy, atribuicao } = args;
       const erro = bloqueiaAtivacaoSemCodigo(status, codigo_aprovacao);
       if (erro) return { content: [{ type: "text", text: JSON.stringify({ error: erro }, null, 2) }] };
       const b = {};
@@ -765,6 +1020,7 @@ function createMcpServer() {
       if (orcamento_total)  b.lifetime_budget  = String(orcamento_total);
       if (data_fim)         b.end_time         = data_fim;
       if (bid_amount)       b.bid_amount       = String(bid_amount);
+      if (bid_strategy)     b.bid_strategy     = bid_strategy;
       if (Array.isArray(atribuicao) && atribuicao.length) b.attribution_spec = atribuicao;
       return { content: [{ type: "text", text: JSON.stringify(await metaPost(`${conjunto_id}`, b), null, 2) }] };
     }
